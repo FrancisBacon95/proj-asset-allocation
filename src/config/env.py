@@ -2,7 +2,9 @@ import os
 import json
 from pathlib import Path
 from dataclasses import dataclass
-from dotenv import load_dotenv
+from src.logger import get_logger
+
+logger = get_logger(__name__)
 
 EXECUTE_ENV = os.getenv("EXECUTE_ENV")
 KIS_API_AUTH_PATH = os.getenv("KIS_API_AUTH_PATH")

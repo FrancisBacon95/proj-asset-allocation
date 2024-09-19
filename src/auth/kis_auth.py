@@ -8,6 +8,10 @@ from datetime import datetime
 import pickle
 
 from src.config.env import PROJECT_ROOT, load_kis_auth_config
+from src.logger import get_logger
+
+logger = get_logger(__name__)
+
 class KISAuth():
     def __init__(self, account_type: str) -> None:
         """생성자

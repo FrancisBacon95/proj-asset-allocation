@@ -8,11 +8,15 @@ import json
 
 import pandas as pd
 import requests
+from src.logger import get_logger
+from src.config.helper import log_method_call
+logger = get_logger(__name__)
 
 class KISAgent(KISAuth):
     '''
     한국투자증권 REST API
     '''
+    @log_method_call
     def __init__(self, account_type) -> None:
         """생성자
         Args:
@@ -26,6 +30,7 @@ class KISAgent(KISAuth):
         super().__init__(account_type)
         self.exchange_rate = yf.Ticker('KRW=X').history(period='1d')['Close'].iloc[-1]
 
+    @log_method_call
     def fetch_domestic_balance(self) -> dict:
         """잔고 조회
 
@@ -102,6 +107,7 @@ class KISAgent(KISAuth):
             fk100, nk100 = data['ctx_area_fk100'], data['ctx_area_nk100']
         return output
     
+    @log_method_call
     def fetch_oversea_balance(self) -> dict:
         # 해외주식 잔고
         """주식 잔고 조회(구매한 주식에 대한 것만 보여줌, 예수금 X)
@@ -155,6 +161,7 @@ class KISAgent(KISAuth):
             fk200, nk200 = data['ctx_area_fk200'], data['ctx_area_nk200']
         return output
 
+    @log_method_call
     def _fetch_single_domestic_balance_page(self, ctx_area_fk100: str = "", ctx_area_nk100: str = "") -> dict:
         """국내주식주문/주식잔고조회
         Args:
@@ -191,6 +198,7 @@ class KISAgent(KISAuth):
         data['tr_cont'] = res.headers['tr_cont']
         return data
 
+    @log_method_call
     def _fetch_single_oversea_balance_page(self, ctx_area_fk200: str = "", ctx_area_nk200: str = "") -> dict:
         """해외주식주문/해외주식 잔고
         Args:
@@ -229,6 +237,7 @@ class KISAgent(KISAuth):
         data['tr_cont'] = res.headers['tr_cont']
         return data
 
+    @log_method_call
     def fetch_oversea_present_balance(self, foreign_currency: bool=True) -> dict:
         """해외주식주문/해외주식 체결기준현재잔고
         Args:
@@ -272,7 +281,8 @@ class KISAgent(KISAuth):
         }
         res = requests.get(url, headers=headers, params=params)
         return res.json()
-    
+
+    @log_method_call    
     def fetch_domestic_price(self, market_code: str, symbol: str) -> dict:
         """주식현재가시세
         Args:
@@ -379,6 +389,7 @@ class KISAgent(KISAuth):
         resp = requests.get(url, headers=headers, params=params)
         return resp.json()
 
+    @log_method_call
     def fetch_oversea_price(self, symbol: str) -> dict:
         """해외주식현재가/해외주식 현재체결가
         Args:
@@ -418,7 +429,8 @@ class KISAgent(KISAuth):
         }
         resp = requests.get(url, headers=headers, params=params)
         return resp.json()
-    
+
+    @log_method_call    
     def fetch_domestic_total_balance(self) -> pd.DataFrame:
         raw_domestic_stock = pd.DataFrame(self.fetch_domestic_balance()['output1'])
         raw_domestic_cash = pd.DataFrame(self.fetch_domestic_balance()['output2'])
@@ -447,6 +459,7 @@ class KISAgent(KISAuth):
         domestic[['current_price', 'current_value', 'current_quantity']] = domestic[['current_price', 'current_value', 'current_quantity']].astype(float)
         return domestic
 
+    @log_method_call
     def fetch_oversea_total_balance(self) -> pd.DataFrame:
         raw_oversea_stock = pd.DataFrame(self.fetch_oversea_balance()['output1'])
         raw_oversea_cash = pd.DataFrame(self.fetch_oversea_present_balance(False)['output2'])
@@ -481,12 +494,14 @@ class KISAgent(KISAuth):
         
         return oversea
 
+    @log_method_call
     def fetch_price(self, ticker: str) -> float:
         # 한국주식: 6글자의 숫자로 이루어짐
         if ticker.isdigit() and len(ticker) == 6:
             return float(self.fetch_domestic_price('J', ticker)['output']['stck_prpr'])
         return float(self.fetch_oversea_price(ticker)['output']['last']) * self.exchange_rate
 
+    @log_method_call
     def create_domestic_order(self, transaction_type: str, ticker: str, price: int, ord_qty: int, ord_dvsn: str) -> dict:
         """국내주식주문/주식주문(현금)
 
@@ -545,8 +560,10 @@ class KISAgent(KISAuth):
         resp = requests.post(url, headers=headers, data=json.dumps(data))
         return resp.json()
 
-    def buy_domestic_stock(self, ticker: str, price: int, ord_qty: int, ord_dvsn: str) -> dict:
-        return self.create_order(transaction_type='buy', ticker=ticker, price=price, ord_qty=ord_qty, ord_dvsn=ord_dvsn)
+    @log_method_call
+    def buy_domestic_stock(self, ticker: str, ord_qty: int, ord_dvsn: str, price: int=0) -> dict:
+        return self.create_domestic_order(transaction_type='buy', ticker=ticker, price=price, ord_qty=ord_qty, ord_dvsn=ord_dvsn)
     
-    def sell_domestic_stock(self, ticker: str, price: int, ord_qty: int, ord_dvsn: str) -> dict:
-        return self.create_order(transaction_type='sell', ticker=ticker, price=price, ord_qty=ord_qty, ord_dvsn=ord_dvsn)
+    @log_method_call
+    def sell_domestic_stock(self, ticker: str, ord_qty: int, ord_dvsn: str, price: int=0) -> dict:
+        return self.create_domestic_order(transaction_type='sell', ticker=ticker, price=price, ord_qty=ord_qty, ord_dvsn=ord_dvsn)
