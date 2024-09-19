@@ -1,7 +1,8 @@
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 import gspread
 import pandas as pd
-from src.config.env import GCP_KEY_PATH
+from src.config.env import GCP_KEY_PATH, EXECUTE_ENV
+from google.auth import default
 
 class GCPAuth():
     def __init__(self) -> None:
@@ -9,8 +10,16 @@ class GCPAuth():
             'https://spreadsheets.google.com/feeds',
             'https://www.googleapis.com/auth/drive',
         ]
-        #개인에 따라 수정 필요 - 다운로드 받았던 키 값 경로 
-        self.credential = ServiceAccountCredentials.from_json_keyfile_name(GCP_KEY_PATH, self.scope)
+
+        # 로컬 환경에서는 JSON 키 파일을 사용하고, Cloud Run에서는 기본 자격 증명을 사용
+        if EXECUTE_ENV == 'LOCAL':
+            # 키 파일 경로가 제공되면 키 파일을 사용한 인증
+            self.credential = Credentials.from_service_account_file(GCP_KEY_PATH, scopes=self.scope)
+        else:
+            #  키 파일 없이 기본 자격 증명 (ADC)을 사용
+            self.credential, _ = default(scopes=self.scope)
+        
+        # gspread를 사용하여 Google Sheets API 인증
         self.client = gspread.authorize(self.credential)
 
     def get_df_from_google_sheets(self, url, sheet) -> pd.DataFrame:
