@@ -1,0 +1,12 @@
+steps:
+  # 1. Docker 이미지를 빌드하는 단계
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$_PROJ_ID/$REPO_NAME:latest', '.']
+
+  # 2. Google Container Registry(GCR) 또는 Artifact Registry에 이미지를 푸시
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$_PROJ_ID/$REPO_NAME:latest']
+
+# 로그 옵션 추가 (Cloud Logging에만 기록)
+options:
+  logging: CLOUD_LOGGING_ONLY

@@ -11,3 +11,4 @@ __pycache__/
 gcp_service_account.json
 kis_api_auth.json
 kis_token_*
+.DS_Store
