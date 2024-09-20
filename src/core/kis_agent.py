@@ -435,8 +435,8 @@ class KISAgent(KISAuth):
         raw_domestic_stock = pd.DataFrame(self.fetch_domestic_balance()['output1'])
         raw_domestic_cash = pd.DataFrame(self.fetch_domestic_balance()['output2'])
         # CASH BALANCE
-        # domestic_cash = pd.DataFrame(raw_domestic_cash['dnca_tot_amt'].rename('current_value')) # 오늘 구매한 주식에 대해서는 정산되지 않은 상태인 것 같다.
-        domestic_cash = pd.DataFrame(raw_domestic_cash['prvs_rcdl_excc_amt'].rename('current_value'))
+        domestic_cash = pd.DataFrame(raw_domestic_cash['dnca_tot_amt'].rename('current_value')) # 오늘 구매한 주식에 대해서는 정산되지 않은 상태인 것 같다.
+        # domestic_cash = pd.DataFrame(raw_domestic_cash['prvs_rcdl_excc_amt'].rename('current_value'))
         domestic_cash['current_value'] = domestic_cash['current_value'].astype(float)
         domestic_cash['stock_nm'] = 'WON_DEPOSIT'
         domestic_cash['ticker'] = 'CASH'

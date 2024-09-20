@@ -21,22 +21,20 @@ class StaticAllocationAgent():
         return result
     
     @log_method_call
-    def run(self):
-        # 현재가격 불러오기
-        total_info = self.allocation_info.copy()
-        total_info['current_price'] = total_info['ticker'].apply(self.kis_agent.fetch_price)
-
-        total_balance =self.kis_agent.fetch_domestic_total_balance().drop(columns=['stock_nm', 'current_price'])
-        total_balance_value = total_balance['current_value'].sum()
-        total_info['target_value'] = total_info['weight'] * int(total_balance_value)
-
-        total_info = total_info.merge(total_balance, on=['ticker'], how='left')
-        total_info[['current_quantity', 'current_value']] = total_info[['current_quantity', 'current_value']].fillna(0)
-        total_info['required_value'] = total_info['target_value'] - total_info['current_value']
-        total_info['required_quantity'] = (total_info['required_value'] / total_info['current_price']).astype(int)
-
+    def create_total_info(self, allocation: pd.DataFrame, balance: pd.DataFrame) -> pd.DataFrame:
+        total_balance_value = balance['current_value'].sum()
         logger.info('total_balance_value: %s', total_balance_value)
 
+        result = pd.merge(left=allocation, right=balance, on=['ticker'], how='left')
+        result[['current_quantity', 'current_value']] = result[['current_quantity', 'current_value']].fillna(0)
+        result['target_value'] = result['weight'] * int(total_balance_value)
+
+        result['required_value'] = result['target_value'] - result['current_value']
+        result['required_quantity'] = (result['required_value'] / result['current_price']).astype(int)
+        return result
+    
+    @log_method_call
+    def run_asset_allocation(self, total_info: pd.DataFrame) -> None:
         for i in total_info.index:
             tmp = total_info.loc[i].to_dict()
             if   tmp['required_quantity'] < 0:
@@ -47,3 +45,18 @@ class StaticAllocationAgent():
                 logger.info(response)
             else:
                 continue
+
+    @log_method_call
+    def run(self):
+        # 자산 배분 비중 정보 가져오기
+        allocation_info = self.allocation_info.copy()
+        # 현재 가격 붙이기
+        allocation_info['current_price'] = allocation_info['ticker'].apply(self.kis_agent.fetch_price)
+
+        # 현재 잔고 불러오기
+        balance_info =self.kis_agent.fetch_domestic_total_balance().drop(columns=['stock_nm', 'current_price'])
+        
+        # 현재 잔고에 대한 자산분배 정보 만들기
+        total_info = self.create_total_info(allocation=allocation_info, balance=balance_info)
+        
+        self.run_asset_allocation(total_info=total_info)
