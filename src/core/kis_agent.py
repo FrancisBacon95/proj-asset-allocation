@@ -31,7 +31,7 @@ class KISAgent(KISAuth):
         self.exchange_rate = yf.Ticker('KRW=X').history(period='1d')['Close'].iloc[-1]
 
     @log_method_call
-    def fetch_domestic_balance(self) -> dict:
+    def fetch_domestic_stock_balance(self) -> dict:
         """잔고 조회
 
         Args:
@@ -107,6 +107,39 @@ class KISAgent(KISAuth):
             fk100, nk100 = data['ctx_area_fk100'], data['ctx_area_nk100']
         return output
     
+    @log_method_call
+    def fetch_domestic_cash_balance(self) -> int:
+        """국내주식주문/매수가능조회
+
+        Args:
+            symbol (str): symbol
+            price (int): 1주당 가격
+            order_type (str): "00": 지정가, "01": 시장가, ..., "80": 바스켓
+        """
+        path = "/uapi/domestic-stock/v1/trading/inquire-psbl-order"
+        url = f"{self.base_url}/{path}"
+        headers = {
+            "content-type": "application/json",
+            "authorization": self.access_token,
+            "appKey": self.auth_config.app_key,
+            "appSecret": self.auth_config.app_secret,
+            "tr_id": "TTTC8908R"
+        }
+        params = {
+            'CANO': self.acc_no_prefix,
+            'ACNT_PRDT_CD': self.acc_no_postfix,
+            'PDNO': '005930',
+            'ORD_UNPR': '',
+            'ORD_DVSN': '01',
+            'CMA_EVLU_AMT_ICLD_YN': '1',
+            'OVRS_ICLD_YN': '1'
+        }
+
+        res = requests.get(url, headers=headers, params=params)
+        data = res.json()
+        data['tr_cont'] = res.headers['tr_cont']
+        return int(data['output']['nrcvb_buy_amt'])
+
     @log_method_call
     def fetch_oversea_balance(self) -> dict:
         # 해외주식 잔고
@@ -238,7 +271,7 @@ class KISAgent(KISAuth):
         return data
 
     @log_method_call
-    def fetch_oversea_present_balance(self, foreign_currency: bool=True) -> dict:
+    def fetch_oversea_cash_balance(self, foreign_currency: bool=True) -> dict:
         """해외주식주문/해외주식 체결기준현재잔고
         Args:
             foreign_currency (bool): True: 외화, False: 원화
@@ -432,17 +465,16 @@ class KISAgent(KISAuth):
 
     @log_method_call    
     def fetch_domestic_total_balance(self) -> pd.DataFrame:
-        raw_domestic_stock = pd.DataFrame(self.fetch_domestic_balance()['output1'])
-        raw_domestic_cash = pd.DataFrame(self.fetch_domestic_balance()['output2'])
+        raw_domestic_stock = pd.DataFrame(self.fetch_domestic_stock_balance()['output1'])
+        raw_domestic_cash = self.fetch_domestic_cash_balance()
         # CASH BALANCE
-        domestic_cash = pd.DataFrame(raw_domestic_cash['dnca_tot_amt'].rename('current_value')) # 오늘 구매한 주식에 대해서는 정산되지 않은 상태인 것 같다.
-        # domestic_cash = pd.DataFrame(raw_domestic_cash['prvs_rcdl_excc_amt'].rename('current_value'))
-        domestic_cash['current_value'] = domestic_cash['current_value'].astype(float)
-        domestic_cash['stock_nm'] = 'WON_DEPOSIT'
-        domestic_cash['ticker'] = 'CASH'
-        domestic_cash['current_price'] = 0
-        domestic_cash['current_quantity'] = 0
-        
+        domestic_cash = pd.DataFrame([{
+            'ticker': 'CASH',
+            'stock_nm': 'WON_DEPOSIT',
+            'current_quantity': 0,
+            'current_price': 0,
+            'current_value': raw_domestic_cash,
+        }])
         # STOCK BALANCE
         domestic_stock = raw_domestic_stock[['pdno', 'prdt_name', 'hldg_qty', 'prpr', 'evlu_amt']].rename(
             columns={
@@ -462,7 +494,7 @@ class KISAgent(KISAuth):
     @log_method_call
     def fetch_oversea_total_balance(self) -> pd.DataFrame:
         raw_oversea_stock = pd.DataFrame(self.fetch_oversea_balance()['output1'])
-        raw_oversea_cash = pd.DataFrame(self.fetch_oversea_present_balance(False)['output2'])
+        raw_oversea_cash = pd.DataFrame(self.fetch_oversea_cash_balance(False)['output2'])
         
         # CASH BALANCE
         oversea_cash = pd.DataFrame(raw_oversea_cash['frcr_evlu_amt2'].rename('current_value'))
@@ -502,7 +534,7 @@ class KISAgent(KISAuth):
         return float(self.fetch_oversea_price(ticker)['output']['last']) * self.exchange_rate
 
     @log_method_call
-    def create_domestic_order(self, transaction_type: str, ticker: str, price: int, ord_qty: int, ord_dvsn: str) -> dict:
+    def create_domestic_order(self, transaction_type: str, ticker: str, ord_qty: int, ord_dvsn: str, price: int=-1) -> dict:
         """국내주식주문/주식주문(현금)
 
         Args:

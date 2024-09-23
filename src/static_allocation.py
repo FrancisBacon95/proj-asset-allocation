@@ -1,6 +1,9 @@
+import pytz
+import pandas as pd
+from datetime import datetime
+
 from src.core.kis_agent import KISAgent
 from src.auth.gcp_auth import GCPAuth
-import pandas as pd
 from src.logger import get_logger
 from src.config.helper import log_method_call
 logger = get_logger(__name__)
@@ -8,14 +11,16 @@ logger = get_logger(__name__)
 class StaticAllocationAgent():
     @log_method_call
     def __init__(self, account_type: str, gs_url: str) -> None:
-        self.kis_agent = KISAgent(account_type)
+        self.account_type = account_type
         self.gs_url = gs_url
-        self.gs_sheet = f'{account_type}_allocation'
+        self.kis_agent = KISAgent(self.account_type)
+        self.gs_auth = GCPAuth(url=self.gs_url)
+        self.gs_sheet = f'{self.account_type}_allocation'
         self.allocation_info = self.get_allocation_info()
     
     @log_method_call
     def get_allocation_info(self) -> pd.DataFrame:
-        result = GCPAuth().get_df_from_google_sheets(url=self.gs_url,sheet=self.gs_sheet)
+        result = self.gs_auth.get_df_from_google_sheets(sheet=self.gs_sheet)
         result['ticker'] = result['ticker'].astype(str)
         result['weight'] = result['weight'].astype(float)
         return result
@@ -34,18 +39,29 @@ class StaticAllocationAgent():
         return result
     
     @log_method_call
-    def run_asset_allocation(self, total_info: pd.DataFrame) -> None:
+    def run_asset_allocation(self, total_info: pd.DataFrame) -> pd.DataFrame:
+        result = []
         for i in total_info.index:
             tmp = total_info.loc[i].to_dict()
             if   tmp['required_quantity'] < 0:
-                response = self.kis_agent.sell_domestic_stock(tmp['ticker'], ord_qty=tmp['required_quantity'], ord_dvsn='01')
-                logger.info(response)
+                transaction_type='sell'
             elif tmp['required_quantity'] > 0:
-                response = self.kis_agent. buy_domestic_stock(tmp['ticker'], ord_qty=tmp['required_quantity'], ord_dvsn='01')
-                logger.info(response)
+                transaction_type='buy'
             else:
                 continue
-
+            
+            response = self.kis_agent.create_domestic_order(transaction_type, tmp['ticker'], ord_qty=tmp['required_quantity'], ord_dvsn='01')
+            is_success = True if response['rt_cd'] == str(0) else False
+            tmp = {
+                'ticker': tmp['ticker'], 
+                'quantity': tmp['required_quantity'], 
+                'transaction_type': transaction_type.upper(), 
+                'is_success': is_success
+            }
+            logger.info(tmp)
+            result += [tmp]
+        return pd.DataFrame(result)
+        
     @log_method_call
     def run(self):
         # 자산 배분 비중 정보 가져오기
@@ -59,4 +75,5 @@ class StaticAllocationAgent():
         # 현재 잔고에 대한 자산분배 정보 만들기
         total_info = self.create_total_info(allocation=allocation_info, balance=balance_info)
         
-        self.run_asset_allocation(total_info=total_info)
+        trade_log = self.run_asset_allocation(total_info=total_info)
+        self.gs_auth.write_worksheet(trade_log, f'{self.account_type}_trad_log')
