@@ -31,6 +31,10 @@ class KISAgent(KISAuth):
         self.exchange_rate = yf.Ticker('KRW=X').history(period='1d')['Close'].iloc[-1]
 
     @log_method_call
+    def fetch_domestic_cash_balance(self) -> int:
+        return int(self.fetch_domestic_enable_buy(ticker='005930', ord_dvsn='01')['nrcvb_buy_amt'])
+    
+    @log_method_call
     def fetch_domestic_stock_balance(self) -> dict:
         """잔고 조회
 
@@ -107,8 +111,9 @@ class KISAgent(KISAuth):
             fk100, nk100 = data['ctx_area_fk100'], data['ctx_area_nk100']
         return output
     
+
     @log_method_call
-    def fetch_domestic_cash_balance(self) -> int:
+    def fetch_domestic_enable_buy(self, ticker: str, ord_dvsn: str='01', price: int=-1) -> dict:
         """국내주식주문/매수가능조회
 
         Args:
@@ -128,17 +133,44 @@ class KISAgent(KISAuth):
         params = {
             'CANO': self.acc_no_prefix,
             'ACNT_PRDT_CD': self.acc_no_postfix,
-            'PDNO': '005930',
-            'ORD_UNPR': '',
-            'ORD_DVSN': '01',
-            'CMA_EVLU_AMT_ICLD_YN': '1',
-            'OVRS_ICLD_YN': '1'
+            'PDNO': ticker,
+            'ORD_UNPR': price if ord_dvsn != '01' else '',
+            'ORD_DVSN': ord_dvsn,
+            'CMA_EVLU_AMT_ICLD_YN': 'N',
+            'OVRS_ICLD_YN': 'N'
         }
 
         res = requests.get(url, headers=headers, params=params)
         data = res.json()
-        data['tr_cont'] = res.headers['tr_cont']
-        return int(data['output']['nrcvb_buy_amt'])
+        return data['output']
+    
+    @log_method_call
+    def fetch_domestic_enable_sell(self, ticker: str) -> dict:
+        """국내주식주문/매수가능조회
+
+        Args:
+            symbol (str): symbol
+            price (int): 1주당 가격
+            order_type (str): "00": 지정가, "01": 시장가, ..., "80": 바스켓
+        """
+        path = "/uapi/domestic-stock/v1/trading/inquire-psbl-sell"
+        url = f"{self.base_url}/{path}"
+        headers = {
+            "content-type": "application/json",
+            "authorization": self.access_token,
+            "appKey": self.auth_config.app_key,
+            "appSecret": self.auth_config.app_secret,
+            "tr_id": "TTTC8408R"
+        }
+        params = {
+            'CANO': self.acc_no_prefix,
+            'ACNT_PRDT_CD': self.acc_no_postfix,
+            'PDNO': ticker,
+        }
+
+        res = requests.get(url, headers=headers, params=params)
+        data = res.json()
+        return data['output']
 
     @log_method_call
     def fetch_oversea_balance(self) -> dict:

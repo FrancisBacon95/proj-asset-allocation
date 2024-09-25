@@ -37,6 +37,9 @@ class GCPAuth():
     def write_worksheet(self, df: pd.DataFrame, worksheet_name: str) -> None:
         tmp = df.copy()
         tmp['update_dt'] = datetime.now(pytz.timezone('Asia/Seoul')).strftime('%Y-%m-%d %H:%M:%S')
+        tmp[tmp.select_dtypes(include=['float']).columns] = tmp.select_dtypes(include=['float']).round(2)
+        tmp[tmp.select_dtypes(include=['float', 'int']).columns] = tmp[tmp.select_dtypes(include=['float', 'int']).columns].fillna(0)
+        tmp = tmp.fillna('')
         real_worksheet_list = list(map(lambda x: x.title, self.spreadsheet.worksheets()))
         if worksheet_name not in real_worksheet_list:
             self.spreadsheet.add_worksheet(title=worksheet_name, rows=tmp.shape[0]+10, cols=tmp.shape[1]+5)

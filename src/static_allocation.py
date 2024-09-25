@@ -10,13 +10,14 @@ logger = get_logger(__name__)
 
 class StaticAllocationAgent():
     @log_method_call
-    def __init__(self, account_type: str, gs_url: str) -> None:
+    def __init__(self, account_type: str, gs_url: str, is_test:bool=False) -> None:
         self.account_type = account_type
         self.gs_url = gs_url
         self.kis_agent = KISAgent(self.account_type)
         self.gs_auth = GCPAuth(url=self.gs_url)
         self.gs_sheet = f'{self.account_type}_allocation'
         self.allocation_info = self.get_allocation_info()
+        self.is_test = is_test
     
     @log_method_call
     def get_allocation_info(self) -> pd.DataFrame:
@@ -35,35 +36,44 @@ class StaticAllocationAgent():
         result['target_value'] = result['weight'] * int(total_balance_value)
 
         result['required_value'] = result['target_value'] - result['current_value']
-        result['required_quantity'] = (result['required_value'] / result['current_price']).astype(int)
+        result['required_quantity'] = abs((result['required_value'] / result['current_price']).astype(int))
+        result['required_transaction'] = result['required_value'].apply(lambda x: 'buy' if x > 0 else 'sell' if x < 0 else None)
         return result
     
     @log_method_call
-    def run_asset_allocation(self, total_info: pd.DataFrame) -> pd.DataFrame:
+    def run_asset_allocation(self, plan_df: pd.DataFrame) -> pd.DataFrame:
         result = []
-        for i in total_info.index:
-            tmp = total_info.loc[i].to_dict()
-            if   tmp['required_quantity'] < 0:
-                transaction_type='sell'
-            elif tmp['required_quantity'] > 0:
-                transaction_type='buy'
-            else:
-                continue
+        for i in plan_df.index:
+            tmp = plan_df.loc[i].to_dict()
+            tmp['enable_quantity'] = self.get_enable_qty(ticker=tmp['ticker'], transaction_type=tmp['required_transaction'])
+            transaction_qty = min(tmp['required_quantity'], tmp['enable_quantity'])
             
-            response = self.kis_agent.create_domestic_order(transaction_type, tmp['ticker'], ord_qty=tmp['required_quantity'], ord_dvsn='01')
+            if self.is_test is True:
+                response = {'msg1': 'TEST', 'rt_cd': '99'}
+            elif transaction_qty == 0:
+                response = {'msg1': '거래 가능 수량이 없습니다.', 'rt_cd': '99'}
+            else:
+                response = self.kis_agent.create_domestic_order(tmp['required_transaction'], tmp['ticker'], ord_qty=transaction_qty, ord_dvsn='01')
+
             is_success = True if response['rt_cd'] == str(0) else False
             tmp = {
                 'ticker': tmp['ticker'], 
-                'quantity': tmp['required_quantity'], 
-                'transaction_type': transaction_type.upper(), 
-                'is_success': is_success
+                'enable_quantity': tmp['enable_quantity'],
+                'transaction_quantity': transaction_qty, 
+                'is_success': is_success,
+                'response_msg': response['msg1'],
+                'transaction_order': i,
             }
-            logger.info(tmp)
             result += [tmp]
         return pd.DataFrame(result)
-        
-    @log_method_call
-    def run(self):
+    
+    def get_enable_qty(self, ticker: str, transaction_type: str) -> int:
+        if transaction_type == 'buy':
+            return int(self.kis_agent.fetch_domestic_enable_buy(ticker=ticker, ord_dvsn='01')['nrcvb_buy_qty'])
+        elif transaction_type == 'sell':
+            return int(self.kis_agent.fetch_domestic_enable_sell(ticker=ticker)['ord_psbl_qty'])
+
+    def get_allocation_plan(self):
         # 자산 배분 비중 정보 가져오기
         allocation_info = self.allocation_info.copy()
         # 현재 가격 붙이기
@@ -73,7 +83,21 @@ class StaticAllocationAgent():
         balance_info =self.kis_agent.fetch_domestic_total_balance().drop(columns=['stock_nm', 'current_price'])
         
         # 현재 잔고에 대한 자산분배 정보 만들기
-        total_info = self.create_total_info(allocation=allocation_info, balance=balance_info)
+        result = self.create_total_info(allocation=allocation_info, balance=balance_info)
+
+        # 매도 작업 이후, 매수 할 수 있도록 변경
+        result = result.sort_values(by='required_value', ascending=True).reset_index(drop=True)
+        return result
+    
+    @log_method_call
+    def run(self)-> pd.DataFrame:
+        # 자산 분배 계획
+        total_info = self.get_allocation_plan()
         
-        trade_log = self.run_asset_allocation(total_info=total_info)
-        self.gs_auth.write_worksheet(trade_log, f'{self.account_type}_trad_log')
+        # 자산 분배 및 거래 로그 수집
+        trade_log = self.run_asset_allocation(plan_df=total_info)
+
+        # 구글 시트 업로드
+        result = total_info.merge(trade_log, on='ticker', how='outer')
+        self.gs_auth.write_worksheet(result, f'{self.account_type}_trade_log')
+        return result
