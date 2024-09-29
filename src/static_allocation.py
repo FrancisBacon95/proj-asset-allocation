@@ -41,7 +41,7 @@ class StaticAllocationAgent():
         return result
     
     @log_method_call
-    def run_asset_allocation(self, plan_df: pd.DataFrame) -> pd.DataFrame:
+    def run_rebalancing(self, plan_df: pd.DataFrame) -> pd.DataFrame:
         result = []
         for i in plan_df.index:
             tmp = plan_df.loc[i].to_dict()
@@ -73,7 +73,7 @@ class StaticAllocationAgent():
         elif transaction_type == 'sell':
             return int(self.kis_agent.fetch_domestic_enable_sell(ticker=ticker)['ord_psbl_qty'])
 
-    def get_allocation_plan(self):
+    def get_rebalancing_plan(self):
         # 자산 배분 비중 정보 가져오기
         allocation_info = self.allocation_info.copy()
         # 현재 가격 붙이기
@@ -92,10 +92,10 @@ class StaticAllocationAgent():
     @log_method_call
     def run(self)-> pd.DataFrame:
         # 자산 분배 계획
-        total_info = self.get_allocation_plan()
+        total_info = self.get_rebalancing_plan()
         
         # 자산 분배 및 거래 로그 수집
-        trade_log = self.run_asset_allocation(plan_df=total_info)
+        trade_log = self.run_rebalancing(plan_df=total_info)
 
         # 구글 시트 업로드
         result = total_info.merge(trade_log, on='ticker', how='outer')
