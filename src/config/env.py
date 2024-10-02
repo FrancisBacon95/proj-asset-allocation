@@ -10,6 +10,7 @@ EXECUTE_ENV = os.getenv("EXECUTE_ENV")
 KIS_API_AUTH_PATH = os.getenv("KIS_API_AUTH_PATH")
 GOOGLE_SERVICE_ACCOUNT_PATH = os.getenv("GOOGLE_SERVICE_ACCOUNT_PATH", '')
 GOOGLE_SHEET_URL = os.getenv("GOOGLE_SHEET_URL")
+PUBLIC_DATA_API_KEY = os.getenv("PUBLIC_DATA_API_KEY")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent 
 
