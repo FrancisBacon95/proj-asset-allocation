@@ -1,6 +1,17 @@
+from datetime import datetime
+import pytz
+from src.logger import get_logger
 from src.config.env import GOOGLE_SHEET_URL
 from src.static_allocation import StaticAllocationAgent
-from src.logger import get_logger
+from src.pre_execute import is_executable
+
 
 logger = get_logger(__name__)
-StaticAllocationAgent(account_type='ISA', gs_url=GOOGLE_SHEET_URL).run()
+account_type = 'ISA'
+
+kst = pytz.timezone('Asia/Seoul')
+kst_date = datetime.now(kst).date()
+if not is_executable(target_date=kst_date, account=account_type):
+    exit(1)
+obj = StaticAllocationAgent(account_type=account_type, gs_url=GOOGLE_SHEET_URL)
+obj.run()
