@@ -11,7 +11,6 @@ account_type = 'ISA'
 
 kst = pytz.timezone('Asia/Seoul')
 kst_date = datetime.now(kst).date()
-if not is_executable(target_date=kst_date, account=account_type):
-    exit(1)
-obj = StaticAllocationAgent(account_type=account_type, gs_url=GOOGLE_SHEET_URL)
-obj.run()
+if is_executable(target_date=kst_date, account=account_type):
+    obj = StaticAllocationAgent(account_type=account_type, gs_url=GOOGLE_SHEET_URL)
+    obj.run()
