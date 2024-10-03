@@ -12,6 +12,7 @@ gspread = "*"
 pandas = "*"
 yfinance = "*"
 python-dotenv = "^1.0.1"
+xmltodict = "*"
 
 
 [build-system]
