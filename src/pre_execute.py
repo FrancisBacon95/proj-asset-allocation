@@ -32,10 +32,10 @@ def check_already_executed(target_date: date, account: str) -> bool:
 
 @log_method_call
 def is_executable(target_date: date, account: str):
-    is_holiday = check_holiday(target_date=target_date)
+    is_weekend = target_date.weekday() in [5, 6]
     is_already_executed = check_already_executed(target_date=target_date, account=account)
-    print(f'- is_holiday: {is_holiday}')
+    print(f'- is_weekend: {is_weekend}')
     print(f'- is_already_executed: {is_already_executed}')
-    if is_holiday or is_already_executed:
+    if is_weekend or is_already_executed:
         return False
     return True
