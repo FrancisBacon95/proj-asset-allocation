@@ -17,4 +17,12 @@ args = parser.parse_args()
 
 if is_executable(target_date=kst_date, account=args.account_type):
     obj = StaticAllocationAgent(account_type=args.account_type, gs_url=GOOGLE_SHEET_URL)
-    obj.run()
+
+    total_info = obj.get_rebalancing_plan()
+        
+    # 자산 분배 및 거래 로그 수집
+    trade_log = obj.run_rebalancing(plan_df=total_info)
+
+    # 구글 시트 업로드
+    result = total_info.merge(trade_log, on='ticker', how='outer')
+    obj.gs_auth.write_worksheet(result, f'{obj.account_type}_trade_log')
