@@ -16,6 +16,9 @@ RUN echo $PYTHONPATH
 
 # Install dependencies
 RUN pip install poetry
-RUN poetry export --without-hashes --format=requirements.txt > requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
- 
+
+# Configure Poetry to not use virtualenvs (ensures global installation)
+RUN poetry config virtualenvs.create false
+
+# Install dependencies with Poetry
+RUN poetry install --no-root
