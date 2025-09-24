@@ -1,12 +1,16 @@
-FROM python:3.9
+FROM python:3.10
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
 # Copy the necessary files to the working directory
 COPY . .
 
-# Set PYTHONPATH
-ENV PYTHONPATH "${PYTHONPATH}:/app"
+# Python 런타임 품질 옵션
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH="${PYTHONPATH}:/app" \
+    PATH="/app/.venv/bin:$PATH"
 
 # Debug: List files in /app and print PYTHONPATH
 
@@ -14,8 +18,5 @@ RUN ls -R /app
 
 RUN echo $PYTHONPATH
 
-# Install dependencies
-RUN pip install poetry
-RUN poetry export --without-hashes --format=requirements.txt > requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
- 
+# Install dependencies.
+RUN uv sync --frozen --no-cache
