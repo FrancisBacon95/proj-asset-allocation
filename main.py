@@ -25,7 +25,7 @@ if __name__ == '__main__':
 
     obj = StaticAllocator(account_type=args.account_type, allocation_info=allocation_info)
 
-    is_market_open = obj.kis_agent.is_trading_day(kst_date)
+    is_market_open = obj.kis_client.is_trading_day(kst_date)
     latest_trade_date = pd.to_datetime(
         gs_client.get_df_from_google_sheets(f'{args.account_type}_trade_log')['update_dt']
     ).dt.date.unique()[0]
