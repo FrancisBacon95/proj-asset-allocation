@@ -5,6 +5,7 @@ from src.auth.kis_auth import KISAuth
 from src.core.stock_config import *
 import yfinance as yf
 import json
+from datetime import date
 
 import pandas as pd
 import requests
@@ -348,7 +349,51 @@ class KISAgent(KISAuth):
         res = requests.get(url, headers=headers, params=params)
         return res.json()
 
-    @log_method_call    
+    @log_method_call
+    def fetch_holiday(self, base_dt: str) -> list:
+        """국내주식 업종/기타/국내휴장일조회
+        Args:
+            base_dt (str): 기준일자 (YYYYMMDD)
+                - 해당 일자부터의 휴장일 목록을 반환
+        Returns:
+            list: output 배열
+            - bass_dt: 기준일자 (YYYYMMDD)
+            - wday_dvsn_cd: 요일구분코드 (01:일, 02:월, 03:화, 04:수, 05:목, 06:금, 07:토)
+            - bzdy_yn: 영업일여부 (Y/N) - 금융기관이 업무를 하는 날
+            - tr_day_yn: 거래일여부 (Y/N) - 증권 업무가 가능한 날
+            - opnd_yn: 개장일여부 (Y/N) - 주식시장이 개장되는 날 (주문 가능 여부 확인 시 사용)
+            - sttl_day_yn: 결제일여부 (Y/N) - 실제 주식 인수 및 대금 지불일
+        Note:
+            모의투자 미지원. 단시간 내 다수 호출 시 서비스에 영향을 줄 수 있어 1일 1회 호출 권장.
+        """
+        path = "uapi/domestic-stock/v1/quotations/chk-holiday"
+        url = f"{self.base_url}/{path}"
+        headers = {
+            "content-type": "application/json",
+            "authorization": self.access_token,
+            "appKey": self.auth_config.app_key,
+            "appSecret": self.auth_config.app_secret,
+            "tr_id": "CTCA0903R",
+            "custtype": "P"
+        }
+        params = {
+            "BASS_DT": base_dt,
+            "CTX_AREA_NK": "",
+            "CTX_AREA_FK": ""
+        }
+        resp = requests.get(url, headers=headers, params=params)
+        return resp.json()['output']
+
+    def is_trading_day(self, target_date: date) -> bool:
+        """오늘이 개장일이고 결제일인지 확인 (주문 가능 여부)"""
+        base_dt = target_date.strftime('%Y%m%d')
+        holidays = self.fetch_holiday(base_dt)
+        today = next((h for h in holidays if h['bass_dt'] == base_dt), None)
+        if today is None:
+            return False
+        return today['opnd_yn'] == 'Y' and today['sttl_day_yn'] == 'Y'
+
+    @log_method_call
     def fetch_domestic_price(self, market_code: str, symbol: str) -> dict:
         """주식현재가시세
         Args:
