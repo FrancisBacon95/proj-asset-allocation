@@ -5,8 +5,8 @@ import pytz
 
 from src.logger import get_logger
 from src.config.env import GOOGLE_SHEET_URL
-from src.auth.gcp_auth import GCPAuth
-from src.static_allocation import StaticAllocationAgent
+from src.sheets.client import GoogleSheetsClient
+from src.allocation import StaticAllocationAgent
 
 logger = get_logger(__name__)
 
@@ -18,8 +18,8 @@ if __name__ == '__main__':
     parser.add_argument('--account_type', type=str)
     args = parser.parse_args()
 
-    gs_auth = GCPAuth(url=GOOGLE_SHEET_URL)
-    allocation_info = gs_auth.get_df_from_google_sheets(f'{args.account_type}_allocation')
+    gs_client = GoogleSheetsClient(url=GOOGLE_SHEET_URL)
+    allocation_info = gs_client.get_df_from_google_sheets(f'{args.account_type}_allocation')
     allocation_info['ticker'] = allocation_info['ticker'].astype(str)
     allocation_info['weight'] = allocation_info['weight'].astype(float)
 
@@ -27,7 +27,7 @@ if __name__ == '__main__':
 
     is_market_open = obj.kis_agent.is_trading_day(kst_date)
     latest_trade_date = pd.to_datetime(
-        gs_auth.get_df_from_google_sheets(f'{args.account_type}_trade_log')['update_dt']
+        gs_client.get_df_from_google_sheets(f'{args.account_type}_trade_log')['update_dt']
     ).dt.date.unique()[0]
     is_already_executed = (kst_date - latest_trade_date).days < 7
 
@@ -36,4 +36,4 @@ if __name__ == '__main__':
 
     if is_market_open and not is_already_executed:
         result = obj.run()
-        gs_auth.write_worksheet(result, f'{args.account_type}_trade_log')
+        gs_client.write_worksheet(result, f'{args.account_type}_trade_log')
