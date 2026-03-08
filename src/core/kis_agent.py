@@ -3,7 +3,6 @@
 '''
 from src.auth.kis_auth import KISAuth
 from src.core.stock_config import *
-import yfinance as yf
 import json
 from datetime import date
 
@@ -29,7 +28,7 @@ class KISAgent(KISAuth):
             mock (bool): True (mock trading), False (real trading)
         """
         super().__init__(account_type)
-        self.exchange_rate = yf.Ticker('KRW=X').history(period='1d')['Close'].iloc[-1]
+        self._exchange_rate = None
 
     @log_method_call
     def fetch_domestic_cash_balance(self) -> int:
@@ -604,6 +603,13 @@ class KISAgent(KISAuth):
         oversea['currency_type'] = 'oversea'
         
         return oversea
+
+    @property
+    def exchange_rate(self) -> float:
+        if self._exchange_rate is None:
+            import yfinance as yf
+            self._exchange_rate = yf.Ticker('KRW=X').history(period='1d')['Close'].iloc[-1]
+        return self._exchange_rate
 
     @log_method_call
     def fetch_price(self, ticker: str, exchange_code: str = "NAS") -> float:
