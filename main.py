@@ -6,7 +6,7 @@ import pytz
 from src.logger import get_logger
 from src.config.env import GOOGLE_SHEET_URL
 from src.sheets.client import GoogleSheetsClient
-from src.allocation import StaticAllocationAgent
+from src.allocation import StaticAllocator
 
 logger = get_logger(__name__)
 
@@ -23,7 +23,7 @@ if __name__ == '__main__':
     allocation_info['ticker'] = allocation_info['ticker'].astype(str)
     allocation_info['weight'] = allocation_info['weight'].astype(float)
 
-    obj = StaticAllocationAgent(account_type=args.account_type, allocation_info=allocation_info)
+    obj = StaticAllocator(account_type=args.account_type, allocation_info=allocation_info)
 
     is_market_open = obj.kis_agent.is_trading_day(kst_date)
     latest_trade_date = pd.to_datetime(
