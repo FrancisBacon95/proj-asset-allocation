@@ -2,20 +2,12 @@ import os
 import json
 from pathlib import Path
 from dataclasses import dataclass
-from src.logger import get_logger
-
-logger = get_logger(__name__)
-
 EXECUTE_ENV = os.getenv("EXECUTE_ENV")
-KIS_API_AUTH_PATH = os.getenv("KIS_API_AUTH_PATH")
-GOOGLE_SERVICE_ACCOUNT_PATH = os.getenv("GOOGLE_SERVICE_ACCOUNT_PATH", '')
+GCP_KEY_PATH = os.getenv("GOOGLE_SERVICE_ACCOUNT_PATH", '')
+KIS_KEY_PATH = os.getenv("KIS_API_AUTH_PATH")
 GOOGLE_SHEET_URL = os.getenv("GOOGLE_SHEET_URL")
-PUBLIC_DATA_API_KEY = os.getenv("PUBLIC_DATA_API_KEY")
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent 
-
-GCP_KEY_PATH = GOOGLE_SERVICE_ACCOUNT_PATH
-KIS_KEY_PATH = KIS_API_AUTH_PATH
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 @dataclass
 class KISAuthConfig:
@@ -30,7 +22,6 @@ def load_kis_auth_config(account_type: str) -> KISAuthConfig:
         kis_auth_data = json.load(file)
     account_data = kis_auth_data.get(account_type)
 
-    # KISAuthConfig 데이터 클래스로 변환
     return KISAuthConfig(
         account_type=account_type,
         user_id=account_data["USER_ID"],
