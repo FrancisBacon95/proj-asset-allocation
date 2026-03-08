@@ -1,15 +1,14 @@
 import pandas as pd
 
-from src.core.kis_agent import KISAgent
-from src.logger import get_logger
-from src.config.helper import log_method_call
+from src.kis.client import KISClient
+from src.logger import get_logger, log_method_call
 logger = get_logger(__name__)
 
 class StaticAllocationAgent():
     @log_method_call
     def __init__(self, account_type: str, allocation_info: pd.DataFrame, is_test: bool = False) -> None:
         self.account_type = account_type
-        self.kis_agent = KISAgent(self.account_type)
+        self.kis_agent = KISClient(self.account_type)
         self.allocation_info = allocation_info
         self.is_test = is_test
 
