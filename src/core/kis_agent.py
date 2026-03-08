@@ -173,10 +173,11 @@ class KISAgent(KISAuth):
         return data['output']
 
     @log_method_call
-    def fetch_oversea_balance(self) -> dict:
+    def fetch_oversea_balance(self, exchange_code: str = "NAS") -> dict:
         # 해외주식 잔고
         """주식 잔고 조회(구매한 주식에 대한 것만 보여줌, 예수금 X)
         Args:
+            exchange_code (str): 거래소 코드 (기본값: "NAS" - 나스닥, "NYS" - 뉴욕증시)
 
         Returns:
             dict: response data
@@ -215,7 +216,7 @@ class KISAgent(KISAuth):
 
         while True:
             # 페이지 데이터 조회
-            data = self._fetch_single_oversea_balance_page(fk200, nk200)
+            data = self._fetch_single_oversea_balance_page(fk200, nk200, exchange_code)
             output['output1'].extend(data['output1'])
             output['output2'].extend([data['output2']])
 
@@ -264,11 +265,12 @@ class KISAgent(KISAuth):
         return data
 
     @log_method_call
-    def _fetch_single_oversea_balance_page(self, ctx_area_fk200: str = "", ctx_area_nk200: str = "") -> dict:
+    def _fetch_single_oversea_balance_page(self, ctx_area_fk200: str = "", ctx_area_nk200: str = "", exchange_code: str = "NAS") -> dict:
         """해외주식주문/해외주식 잔고
         Args:
             ctx_area_fk200 (str): 연속조회검색조건200
             ctx_area_nk200 (str): 연속조회키200
+            exchange_code (str): 거래소 코드 (기본값: "NAS" - 나스닥, "NYS" - 뉴욕증시)
         Returns:
             dict: _description_
         """
@@ -285,13 +287,12 @@ class KISAgent(KISAuth):
         }
 
         # query parameter
-        exchange_cd = "NAS"
         currency_cd = "USD"
 
         params = {
             'CANO': self.acc_no_prefix,
             'ACNT_PRDT_CD': self.acc_no_postfix,
-            'OVRS_EXCG_CD': exchange_cd,
+            'OVRS_EXCG_CD': exchange_code,
             'TR_CRCY_CD': currency_cd,
             'CTX_AREA_FK200': ctx_area_fk200,
             'CTX_AREA_NK200': ctx_area_nk200
@@ -455,10 +456,11 @@ class KISAgent(KISAuth):
         return resp.json()
 
     @log_method_call
-    def fetch_oversea_price(self, symbol: str) -> dict:
+    def fetch_oversea_price(self, symbol: str, exchange_code: str = "NAS") -> dict:
         """해외주식현재가/해외주식 현재체결가
         Args:
             symbol (str): 종목코드
+            exchange_code (str): 거래소 코드 (기본값: "NAS" - 나스닥, "NYS" - 뉴욕증시)
         Returns:
             dict: API 개발 가이드 참조
             - rsym: 실시간조회종목코드
@@ -489,7 +491,7 @@ class KISAgent(KISAuth):
         # query parameter
         params = {
             "AUTH": "",
-            "EXCD": "NAS",
+            "EXCD": exchange_code,
             "SYMB": symbol
         }
         resp = requests.get(url, headers=headers, params=params)
@@ -524,8 +526,8 @@ class KISAgent(KISAuth):
         return domestic
 
     @log_method_call
-    def fetch_oversea_total_balance(self) -> pd.DataFrame:
-        raw_oversea_stock = pd.DataFrame(self.fetch_oversea_balance()['output1'])
+    def fetch_oversea_total_balance(self, exchange_code: str = "NAS") -> pd.DataFrame:
+        raw_oversea_stock = pd.DataFrame(self.fetch_oversea_balance(exchange_code)['output1'])
         raw_oversea_cash = pd.DataFrame(self.fetch_oversea_cash_balance(False)['output2'])
         
         # CASH BALANCE
@@ -559,11 +561,11 @@ class KISAgent(KISAuth):
         return oversea
 
     @log_method_call
-    def fetch_price(self, ticker: str) -> float:
+    def fetch_price(self, ticker: str, exchange_code: str = "NAS") -> float:
         # 한국주식: 6글자의 숫자로 이루어짐
         if ticker.isdigit() and len(ticker) == 6:
             return float(self.fetch_domestic_price('J', ticker)['output']['stck_prpr'])
-        return float(self.fetch_oversea_price(ticker)['output']['last']) * self.exchange_rate
+        return float(self.fetch_oversea_price(ticker, exchange_code)['output']['last']) * self.exchange_rate
 
     @log_method_call
     def create_domestic_order(self, transaction_type: str, ticker: str, ord_qty: int, ord_dvsn: str, price: int=-1) -> dict:
