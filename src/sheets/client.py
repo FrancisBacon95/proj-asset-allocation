@@ -22,7 +22,7 @@ class GoogleSheetsClient():
         self.client = gspread.authorize(self.credential)
         self.spreadsheet = self.client.open_by_url(self.gs_url)
 
-    def get_worksheet(self, sheet) -> gspread.worksheet:
+    def get_worksheet(self, sheet) -> gspread.Worksheet:
         return self.spreadsheet.worksheet(sheet)
 
     def get_df_from_google_sheets(self, sheet) -> pd.DataFrame:

@@ -8,7 +8,6 @@ from zoneinfo import ZoneInfo
 from datetime import date, datetime
 
 import pandas as pd
-from src.kis.stock_config import *
 from src.config.env import PROJECT_ROOT, load_kis_auth_config
 from src.logger import get_logger, log_method_call
 
