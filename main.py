@@ -36,7 +36,7 @@ if __name__ == '__main__':
     print(f'- is_market_open: {is_market_open}')
     print(f'- is_already_executed: {is_already_executed}')
 
-    if is_market_open and (args.test or not is_already_executed):
+    if args.test or (is_market_open and not is_already_executed):
         result = obj.run()
         slack_notify(f'[{args.account_type}] 리밸런싱 결과', _format_result_for_slack(result))
         if not args.test:
