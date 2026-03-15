@@ -6,7 +6,8 @@ import pytz
 from src.logger import get_logger
 from src.config.env import GOOGLE_SHEET_URL
 from src.sheets.client import GoogleSheetsClient
-from src.allocation import StaticAllocator
+from src.allocation import StaticAllocator, _format_result_for_slack
+from src.slack.client import slack_notify
 
 logger = get_logger(__name__)
 
@@ -16,6 +17,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--account_type', type=str)
+    parser.add_argument('--test', action='store_true', default=False)
     args = parser.parse_args()
 
     gs_client = GoogleSheetsClient(url=GOOGLE_SHEET_URL)
@@ -23,7 +25,7 @@ if __name__ == '__main__':
     allocation_info['ticker'] = allocation_info['ticker'].astype(str)
     allocation_info['weight'] = allocation_info['weight'].astype(float)
 
-    obj = StaticAllocator(account_type=args.account_type, allocation_info=allocation_info)
+    obj = StaticAllocator(account_type=args.account_type, allocation_info=allocation_info, is_test=args.test)
 
     is_market_open = obj.kis_client.is_trading_day(kst_date)
     latest_trade_date = pd.to_datetime(
@@ -34,6 +36,8 @@ if __name__ == '__main__':
     print(f'- is_market_open: {is_market_open}')
     print(f'- is_already_executed: {is_already_executed}')
 
-    if is_market_open and not is_already_executed:
+    if is_market_open and (args.test or not is_already_executed):
         result = obj.run()
-        gs_client.write_worksheet(result, f'{args.account_type}_trade_log')
+        slack_notify(f'[{args.account_type}] 리밸런싱 결과', _format_result_for_slack(result))
+        if not args.test:
+            gs_client.write_worksheet(result, f'{args.account_type}_trade_log')
