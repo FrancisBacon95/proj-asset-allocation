@@ -18,6 +18,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--account_type', type=str)
     parser.add_argument('--test', action='store_true', default=False)
+    parser.add_argument('--force', action='store_true', default=False)
     args = parser.parse_args()
 
     gs_client = GoogleSheetsClient(url=GOOGLE_SHEET_URL)
@@ -36,7 +37,7 @@ if __name__ == '__main__':
     print(f'- is_market_open: {is_market_open}')
     print(f'- is_already_executed: {is_already_executed}')
 
-    if args.test or (is_market_open and not is_already_executed):
+    if args.test or args.force or (is_market_open and not is_already_executed):
         result = obj.run()
         slack_notify(f'[{args.account_type}] 리밸런싱 결과', _format_result_for_slack(result))
         if not args.test:
