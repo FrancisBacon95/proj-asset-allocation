@@ -153,7 +153,7 @@ class StaticAllocator():
         if transaction_type == 'buy':
             result = self.kis_client.fetch_domestic_enable_buy(ticker=ticker, ord_dvsn='01')
             calc_price = int(result['psbl_qty_calc_unpr'])
-            available_amt = int(result['nrcvb_buy_amt']) + int(result['ruse_psbl_amt'])
+            available_amt = (int(result['nrcvb_buy_amt']) + int(result['ruse_psbl_amt'])) * 0.99
             return int(available_amt / calc_price) if calc_price > 0 else 0
         elif transaction_type == 'sell':
             return int(self.kis_client.fetch_domestic_enable_sell(ticker=ticker)['ord_psbl_qty'])
