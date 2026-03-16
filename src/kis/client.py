@@ -149,9 +149,18 @@ class KISClient():
 
     @log_method_call
     def fetch_domestic_cash_balance(self) -> int:
-        """국내 계좌 예수금(원화 현금)을 조회한다."""
-        data = self._domestic_balance_page()
-        return int(data['output2'][0]['dnca_tot_amt'])
+        """국내 계좌 실질 현금을 조회한다.
+
+        dnca_tot_amt(결제 완료 예수금)에 당일 매도/매수 체결 금액을 반영해
+        실시간 실질 현금을 반환한다. 거래가 없는 날은 thdt_sll_amt와 thdt_buy_amt가
+        모두 0이므로 dnca_tot_amt 단독 값과 동일하다.
+        """
+        output2 = self._domestic_balance_page()['output2'][0]
+        return (
+            int(output2['dnca_tot_amt'])
+            + int(output2['thdt_sll_amt'])
+            - int(output2['thdt_buy_amt'])
+        )
 
     @log_method_call
     def fetch_domestic_stock_balance(self) -> dict:
