@@ -6,10 +6,8 @@ from src.logger import get_logger, log_method_call
 from src.slack.client import slack_notify
 logger = get_logger(__name__)
 
-# 주문 간 대기 시간 (초). KIS API 호출 빈도 제한을 준수하기 위해 각 주문 후 sleep한다.
-ORDER_INTERVAL_SECONDS = 3
 # sell 완료 후 buy를 시작하기 전 대기 시간 (초). 매도 체결 후 예수금 반영까지 시간이 필요하다.
-SELL_TO_BUY_WAIT_SECONDS = 30
+SELL_TO_BUY_WAIT_SECONDS = 3
 
 
 def _format_plan_for_slack(df: pd.DataFrame) -> str:
@@ -96,7 +94,6 @@ class StaticAllocator():
         result = []
         for i in sells.index:
             result.append(self._execute_order(sells.loc[i].to_dict(), i))
-            time.sleep(ORDER_INTERVAL_SECONDS)
 
         # sell이 하나라도 있었고 buy도 있을 때만 대기. sell-only 또는 buy-only 시나리오는 skip.
         if sells.shape[0] > 0 and buys.shape[0] > 0:
@@ -109,7 +106,6 @@ class StaticAllocator():
 
         for i in buys.index:
             result.append(self._execute_order(buys.loc[i].to_dict(), i))
-            time.sleep(ORDER_INTERVAL_SECONDS)
 
         cash_after_buy = self.kis_client.fetch_domestic_cash_balance()
         logger.info('buy 완료 후 예수금: %s', cash_after_buy)
