@@ -20,7 +20,7 @@ if __name__ == '__main__':
     parser.add_argument('--test', action='store_true', default=False)
     parser.add_argument('--force', action='store_true', default=False)
     args = parser.parse_args()
-
+    
     gs_client = GoogleSheetsClient(url=GOOGLE_SHEET_URL)
     allocation_info = gs_client.get_df_from_google_sheets(f'{args.account_type}_allocation')
     allocation_info['ticker'] = allocation_info['ticker'].astype(str)

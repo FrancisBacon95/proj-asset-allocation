@@ -8,7 +8,7 @@ logger = get_logger(__name__)
 
 # sell 완료 후 buy를 시작하기 전 대기 시간 (초). 매도 체결 후 예수금 반영까지 시간이 필요하다.
 SELL_TO_BUY_WAIT_SECONDS = 3
-
+BUFFER_CASH = 10_000  # 리밸런싱 후 최소 예수금 버퍼 (원)
 
 def _format_plan_for_slack(df: pd.DataFrame) -> str:
     """리밸런싱 플랜 DataFrame을 Slack 메시지 형식의 문자열로 변환한다."""
@@ -18,6 +18,7 @@ def _format_plan_for_slack(df: pd.DataFrame) -> str:
             f"*[{row['stock_nm']}: `{row['ticker']}`]*\n"
             f"- current_price: `{row['current_price']:,.0f}`\n"
             f"- current_quantity: `{row['current_quantity']:,.0f}`\n"
+            f"- current_value: `{row['current_value']:,.0f}`\n"
             f"- target_value: `{row['target_value']:,.0f}`\n"
             f"- required_value: `{row['required_value']:,.0f}`\n"
             f"- required_quantity: `{row['required_quantity']}`\n"
@@ -32,6 +33,9 @@ def _format_result_for_slack(df: pd.DataFrame) -> str:
     for _, row in df.iterrows():
         lines.append(
             f"*[{row['stock_nm']}: `{row['ticker']}`]*\n"
+            f"- current_price: `{row['current_price']:,.0f}`\n"
+            f"- current_quantity: `{row['current_quantity']:,.0f}`\n"
+            f"- current_value: `{row['current_value']:,.0f}`\n"
             f"- required_transaction: `{row['required_transaction']}`\n"
             f"- required_quantity: `{row['required_quantity']}`\n"
             f"- enable_quantity: `{row['enable_quantity']}`\n"
@@ -64,12 +68,14 @@ class StaticAllocator():
         현재 금액과의 차이로 필요 거래 수량과 방향(buy/sell)을 결정한다.
         """
         total_balance_value = balance['current_value'].sum()
-        logger.info('total_balance_value: %s', total_balance_value)
+        logger.info('총 평가금액 (예수금 포함): %s원', f'{total_balance_value:,.0f}')
+        slack_notify(f'[{self.account_type}] 총 평가금액 (예수금 포함)', f'`{total_balance_value:,.0f}원`')
 
         # 목표 비중 테이블에 현재 잔고를 left join. 미보유 종목은 current_quantity/value를 0으로 채운다.
         result = pd.merge(left=allocation, right=balance, on=['ticker'], how='left')
         result[['current_quantity', 'current_value']] = result[['current_quantity', 'current_value']].fillna(0)
-        result['target_value'] = result['weight'] * int(total_balance_value)
+        # 리밸런싱 후 최소 예수금 버퍼 확보를 위해 10,000원을 차감한 금액을 기준으로 목표 금액을 계산한다.
+        result['target_value'] = result['weight'] * int(total_balance_value - BUFFER_CASH)
 
         result['required_value'] = result['target_value'] - result['current_value']
         # 수량은 절댓값으로 계산 (방향은 required_transaction으로 별도 표현)
@@ -106,7 +112,6 @@ class StaticAllocator():
 
         for i in buys.index:
             result.append(self._execute_order(buys.loc[i].to_dict(), i))
-
         cash_after_buy = self.kis_client.fetch_domestic_cash_balance()
         logger.info('buy 완료 후 예수금: %s', cash_after_buy)
         slack_notify(f'[{self.account_type}] buy 완료 후 예수금', f'`{cash_after_buy:,}원`')
@@ -164,10 +169,29 @@ class StaticAllocator():
         allocation_info = self.allocation_info.copy()
         allocation_info['current_price'] = allocation_info['ticker'].apply(self.kis_client.fetch_price)
 
+        full_balance = self.kis_client.fetch_domestic_total_balance()
+
         # stock_nm, current_price는 allocation_info 기준을 사용하므로 잔고에서 제거
-        balance_info = self.kis_client.fetch_domestic_total_balance().drop(columns=['stock_nm', 'current_price'])
+        balance_info = full_balance.drop(columns=['stock_nm', 'current_price'])
 
         result = self._create_total_info(allocation=allocation_info, balance=balance_info)
+
+        # allocation에 없는 종목(CASH 제외)은 전량 매도 대상으로 추가
+        unallocated = full_balance[
+            ~full_balance['ticker'].isin(allocation_info['ticker']) &
+            (full_balance['ticker'] != 'CASH')
+        ].copy()
+        if not unallocated.empty:
+            logger.info('allocation 미등록 종목 전량 매도 대상: %s', unallocated['ticker'].tolist())
+            unallocated['category_1'] = None
+            unallocated['category_2'] = None
+            unallocated['weight'] = 0.0
+            unallocated['target_value'] = 0.0
+            unallocated['required_value'] = -unallocated['current_value']
+            unallocated['required_quantity'] = unallocated['current_quantity'].astype(int)
+            unallocated['required_transaction'] = 'sell'
+            result = pd.concat([result, unallocated[result.columns]], ignore_index=True)
+
         result = result.sort_values(by='required_value', ascending=True).reset_index(drop=True)
         return result
 
