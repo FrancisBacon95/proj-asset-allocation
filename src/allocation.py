@@ -110,20 +110,24 @@ class StaticAllocator():
         logger.info('buy 시작 전 예수금: %s', cash_before_buy)
         slack_notify(f'[{self.account_type}] sell 이후 예수금', f'`{cash_before_buy:,}원`')
 
+        remaining_cash = cash_before_buy
         for i in buys.index:
-            result.append(self._execute_order(buys.loc[i].to_dict(), i))
+            order_result = self._execute_order(buys.loc[i].to_dict(), i, available_cash=remaining_cash)
+            # 체결 여부와 무관하게 API 반영 지연을 고려해 주문 금액을 즉시 차감
+            remaining_cash -= order_result['transaction_quantity'] * int(buys.loc[i]['current_price'])
+            result.append(order_result)
         cash_after_buy = self.kis_client.fetch_domestic_cash_balance()
         logger.info('buy 완료 후 예수금: %s', cash_after_buy)
         slack_notify(f'[{self.account_type}] buy 완료 후 예수금', f'`{cash_after_buy:,}원`')
         return pd.DataFrame(result)
 
-    def _execute_order(self, plan_row: dict, order_index: int) -> dict:
+    def _execute_order(self, plan_row: dict, order_index: int, available_cash: int = None) -> dict:
         """단일 종목의 주문을 실행하고 결과를 dict로 반환한다.
 
         실제 주문 수량은 계획 수량과 주문 가능 수량 중 작은 값을 사용한다.
         is_test=True이거나 주문 가능 수량이 0이면 API를 호출하지 않는다.
         """
-        enable_qty = self._get_orderable_qty(ticker=plan_row['ticker'], transaction_type=plan_row['required_transaction'])
+        enable_qty = self._get_orderable_qty(ticker=plan_row['ticker'], transaction_type=plan_row['required_transaction'], available_cash=available_cash)
         # 계획 수량이 실제 가능 수량을 초과할 수 있으므로 min으로 제한
         transaction_qty = min(plan_row['required_quantity'], enable_qty)
 
@@ -143,18 +147,24 @@ class StaticAllocator():
             'transaction_order': order_index,  # 실행 순서 (Google Sheets 기록용)
         }
 
-    def _get_orderable_qty(self, ticker: str, transaction_type: str) -> int:
+    def _get_orderable_qty(self, ticker: str, transaction_type: str, available_cash: int = None) -> int:
         """매수 또는 매도 가능 수량을 조회한다.
 
-        매수의 경우 예수금 기준으로 살 수 있는 수량을 계산한다.
-        psbl_qty_calc_unpr: 수량 계산에 사용되는 단가
-        nrcvb_buy_amt: 미수 없는 매수 가능 금액
-        ruse_psbl_amt: 재사용 가능 금액
+        매수의 경우:
+        - available_cash가 전달되면 해당 값을 기준으로 수량을 계산한다 (연속 매수 시 잔여 현금 추적용).
+        - 전달되지 않으면 실시간 현금 잔고를 조회한다.
+        nrcvb_buy_amt는 당일 ETF 매도 대금(T+2 결제)을 반영하지 않으므로 사용하지 않는다.
         """
         if transaction_type == 'buy':
             result = self.kis_client.fetch_domestic_enable_buy(ticker=ticker, ord_dvsn='01')
             calc_price = int(result['psbl_qty_calc_unpr'])
-            available_amt = (int(result['nrcvb_buy_amt']) + int(result['ruse_psbl_amt'])) * 0.99
+            cash_balance = available_cash if available_cash is not None else self.kis_client.fetch_domestic_cash_balance()
+            available_amt = cash_balance * 0.99
+            logger.info(
+                '[%s] cash_balance=%s, available_amt=%s, calc_price=%s → enable_qty=%s',
+                ticker, f'{cash_balance:,}', f'{available_amt:,.0f}', f'{calc_price:,}',
+                int(available_amt / calc_price) if calc_price > 0 else 0,
+            )
             return int(available_amt / calc_price) if calc_price > 0 else 0
         elif transaction_type == 'sell':
             return int(self.kis_client.fetch_domestic_enable_sell(ticker=ticker)['ord_psbl_qty'])
