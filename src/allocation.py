@@ -18,7 +18,7 @@ def _format_plan_for_slack(df: pd.DataFrame) -> str:
             f"*[{row['stock_nm']}: `{row['ticker']}`]*\n"
             f"- current_price: `{row['current_price']:,.0f}`\n"
             f"- current_quantity: `{row['current_quantity']:,.0f}`\n"
-            f"- current_value: `{row['current_value']:,.0f}`\n"
+            f"- current_value: `{row['current_value']:,.0f}` (`{row['current_pct']:.2f}%` → 목표: `{row['weight']*100:.2f}%`)\n"
             f"- target_value: `{row['target_value']:,.0f}`\n"
             f"- required_value: `{row['required_value']:,.0f}`\n"
             f"- required_quantity: `{row['required_quantity']}`\n"
@@ -35,7 +35,7 @@ def _format_result_for_slack(df: pd.DataFrame) -> str:
             f"*[{row['stock_nm']}: `{row['ticker']}`]*\n"
             f"- current_price: `{row['current_price']:,.0f}`\n"
             f"- current_quantity: `{row['current_quantity']:,.0f}`\n"
-            f"- current_value: `{row['current_value']:,.0f}`\n"
+            f"- current_value: `{row['current_value']:,.0f}` (`{row['current_pct']:.2f}%` → 목표: `{row['weight']*100:.2f}%`)\n"
             f"- required_transaction: `{row['required_transaction']}`\n"
             f"- required_quantity: `{row['required_quantity']}`\n"
             f"- enable_quantity: `{row['enable_quantity']}`\n"
@@ -81,6 +81,7 @@ class StaticAllocator():
         # 수량은 절댓값으로 계산 (방향은 required_transaction으로 별도 표현)
         result['required_quantity'] = abs((result['required_value'] / result['current_price']).astype(int))
         result['required_transaction'] = result['required_value'].apply(lambda x: 'buy' if x > 0 else 'sell' if x < 0 else None)
+        result['current_pct'] = result['current_value'] / total_balance_value * 100
         return result
 
     @log_method_call
@@ -193,6 +194,7 @@ class StaticAllocator():
         ].copy()
         if not unallocated.empty:
             logger.info('allocation 미등록 종목 전량 매도 대상: %s', unallocated['ticker'].tolist())
+            total_balance = full_balance['current_value'].sum()
             unallocated['category_1'] = None
             unallocated['category_2'] = None
             unallocated['weight'] = 0.0
@@ -200,6 +202,7 @@ class StaticAllocator():
             unallocated['required_value'] = -unallocated['current_value']
             unallocated['required_quantity'] = unallocated['current_quantity'].astype(int)
             unallocated['required_transaction'] = 'sell'
+            unallocated['current_pct'] = unallocated['current_value'] / total_balance * 100
             result = pd.concat([result, unallocated[result.columns]], ignore_index=True)
 
         result = result.sort_values(by='required_value', ascending=True).reset_index(drop=True)
