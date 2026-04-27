@@ -29,10 +29,10 @@ if __name__ == '__main__':
     obj = StaticAllocator(account_type=args.account_type, allocation_info=allocation_info, is_test=args.test)
 
     is_market_open = obj.kis_client.is_trading_day(kst_date)
-    latest_trade_date = pd.to_datetime(
+    trade_log_dates = pd.to_datetime(
         gs_client.get_df_from_google_sheets(f'{args.account_type}_trade_log')['update_dt']
-    ).dt.date.unique()[0]
-    is_already_executed = (kst_date - latest_trade_date).days < 7
+    ).dt.date.unique()
+    is_already_executed = len(trade_log_dates) > 0 and (kst_date - trade_log_dates[0]).days < 7
 
     print(f'- is_market_open: {is_market_open}')
     print(f'- is_already_executed: {is_already_executed}')
