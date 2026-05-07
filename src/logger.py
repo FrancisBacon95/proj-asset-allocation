@@ -23,8 +23,7 @@ def get_logger(name: str) -> logging.Logger:
     formatter = logging.Formatter(LOG_FORMAT)
     console_handler.setFormatter(formatter)
 
-    # 핸들러가 없는 경우 추가 (중복 방지)
-    if not logger.hasHandlers():
+    if not logger.handlers:
         logger.addHandler(console_handler)
 
     return logger

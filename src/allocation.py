@@ -10,15 +10,21 @@ logger = get_logger(__name__)
 SELL_TO_BUY_WAIT_SECONDS = 3
 BUFFER_CASH = 10_000  # 리밸런싱 후 최소 예수금 버퍼 (원)
 
+def _format_stock_header(row) -> str:
+    return (
+        f"*[{row['stock_nm']}: `{row['ticker']}`]*\n"
+        f"- current_price: `{row['current_price']:,.0f}`\n"
+        f"- current_quantity: `{row['current_quantity']:,.0f}`\n"
+        f"- current_value: `{row['current_value']:,.0f}` (`{row['current_pct']:.2f}%` → 목표: `{row['weight']*100:.2f}%`)"
+    )
+
+
 def _format_plan_for_slack(df: pd.DataFrame) -> str:
     """리밸런싱 플랜 DataFrame을 Slack 메시지 형식의 문자열로 변환한다."""
     lines = []
     for _, row in df.iterrows():
         lines.append(
-            f"*[{row['stock_nm']}: `{row['ticker']}`]*\n"
-            f"- current_price: `{row['current_price']:,.0f}`\n"
-            f"- current_quantity: `{row['current_quantity']:,.0f}`\n"
-            f"- current_value: `{row['current_value']:,.0f}` (`{row['current_pct']:.2f}%` → 목표: `{row['weight']*100:.2f}%`)\n"
+            _format_stock_header(row) + "\n"
             f"- target_value: `{row['target_value']:,.0f}`\n"
             f"- required_value: `{row['required_value']:,.0f}`\n"
             f"- required_quantity: `{row['required_quantity']}`\n"
@@ -32,33 +38,38 @@ def _format_result_for_slack(df: pd.DataFrame) -> str:
     lines = []
     for _, row in df.iterrows():
         lines.append(
-            f"*[{row['stock_nm']}: `{row['ticker']}`]*\n"
-            f"- current_price: `{row['current_price']:,.0f}`\n"
-            f"- current_quantity: `{row['current_quantity']:,.0f}`\n"
-            f"- current_value: `{row['current_value']:,.0f}` (`{row['current_pct']:.2f}%` → 목표: `{row['weight']*100:.2f}%`)\n"
+            _format_stock_header(row) + "\n"
             f"- required_transaction: `{row['required_transaction']}`\n"
             f"- required_quantity: `{row['required_quantity']}`\n"
             f"- enable_quantity: `{row['enable_quantity']}`\n"
             f"- transaction_quantity: `{row['transaction_quantity']}`\n"
+            f"- skipped_reason: `{row.get('skipped_reason')}`\n"
             f"- is_success: `{row['is_success']}`\n"
             f"- response_msg: `{row['response_msg']}`"
         )
     return '\n\n'.join(lines)
 
 
-class StaticAllocator():
-    """목표 비중 기반 국내주식 정적 자산배분 실행기.
+class PortfolioPlanner:
+    """목표 비중과 현재 잔고를 바탕으로 리밸런싱 플랜을 계산한다."""
 
-    allocation_info(종목별 목표 비중)와 현재 잔고를 비교해
-    매수/매도 수량을 계산하고 주문을 실행한다.
-    """
-    @log_method_call
-    def __init__(self, account_type: str, allocation_info: pd.DataFrame, is_test: bool = False) -> None:
-        self.account_type = account_type
-        self.kis_client = KISClient(self.account_type)
+    def __init__(self, kis_client: KISClient, allocation_info: pd.DataFrame, account_type: str) -> None:
+        self.kis_client = kis_client
         self.allocation_info = allocation_info
-        # is_test=True이면 주문 API를 호출하지 않고 더미 응답을 반환한다
-        self.is_test = is_test
+        self.account_type = account_type
+        self._validate_allocation(allocation_info)
+
+    @staticmethod
+    def _validate_allocation(df: pd.DataFrame) -> None:
+        if df.empty:
+            raise ValueError("allocation_info가 비어 있습니다.")
+        if df['ticker'].isnull().any() or (df['ticker'] == '').any():
+            raise ValueError("ticker에 빈 값이 있습니다.")
+        if df['ticker'].duplicated().any():
+            dupes = df.loc[df['ticker'].duplicated(keep=False), 'ticker'].tolist()
+            raise ValueError(f"ticker 중복이 있습니다: {dupes}")
+        if (df['weight'] < 0).any():
+            raise ValueError("weight에 음수 값이 있습니다.")
 
     @log_method_call
     def _create_total_info(self, allocation: pd.DataFrame, balance: pd.DataFrame) -> pd.DataFrame:
@@ -68,12 +79,21 @@ class StaticAllocator():
         현재 금액과의 차이로 필요 거래 수량과 방향(buy/sell)을 결정한다.
         """
         total_balance_value = balance['current_value'].sum()
+        if total_balance_value <= BUFFER_CASH:
+            raise ValueError(
+                f"총 평가금액({total_balance_value:,.0f}원)이 버퍼({BUFFER_CASH:,}원) 이하입니다. 리밸런싱 중단."
+            )
         logger.info('총 평가금액 (예수금 포함): %s원', f'{total_balance_value:,.0f}')
         slack_notify(f'[{self.account_type}] 총 평가금액 (예수금 포함)', f'`{total_balance_value:,.0f}원`')
 
         # 목표 비중 테이블에 현재 잔고를 left join. 미보유 종목은 current_quantity/value를 0으로 채운다.
         result = pd.merge(left=allocation, right=balance, on=['ticker'], how='left')
         result[['current_quantity', 'current_value']] = result[['current_quantity', 'current_value']].fillna(0)
+
+        invalid_prices = result[~(result['current_price'] > 0)]
+        if not invalid_prices.empty:
+            raise ValueError(f"유효하지 않은 가격(0 또는 NaN)이 있는 종목: {invalid_prices['ticker'].tolist()}")
+
         # 리밸런싱 후 최소 예수금 버퍼 확보를 위해 10,000원을 차감한 금액을 기준으로 목표 금액을 계산한다.
         result['target_value'] = result['weight'] * int(total_balance_value - BUFFER_CASH)
 
@@ -83,6 +103,53 @@ class StaticAllocator():
         result['required_transaction'] = result['required_value'].apply(lambda x: 'buy' if x > 0 else 'sell' if x < 0 else None)
         result['current_pct'] = result['current_value'] / total_balance_value * 100
         return result
+
+    @log_method_call
+    def get_rebalancing_plan(self) -> pd.DataFrame:
+        """현재 잔고와 목표 비중을 바탕으로 리밸런싱 플랜 DataFrame을 생성한다.
+
+        required_value 기준 오름차순 정렬로 sell이 앞에 오도록 한다.
+        (음수 required_value = sell, 양수 = buy)
+        """
+        allocation_info = self.allocation_info.copy()
+        allocation_info['current_price'] = allocation_info['ticker'].apply(self.kis_client.fetch_price)
+
+        full_balance = self.kis_client.fetch_domestic_total_balance()
+
+        # stock_nm, current_price는 allocation_info 기준을 사용하므로 잔고에서 제거
+        balance_info = full_balance.drop(columns=['stock_nm', 'current_price'])
+
+        result = self._create_total_info(allocation=allocation_info, balance=balance_info)
+
+        # allocation에 없는 종목(CASH 제외)은 전량 매도 대상으로 추가
+        unallocated = full_balance[
+            ~full_balance['ticker'].isin(allocation_info['ticker']) &
+            (full_balance['ticker'] != 'CASH')
+        ].copy()
+        if not unallocated.empty:
+            logger.info('allocation 미등록 종목 전량 매도 대상: %s', unallocated['ticker'].tolist())
+            total_balance = full_balance['current_value'].sum()
+            unallocated['category_1'] = None
+            unallocated['category_2'] = None
+            unallocated['weight'] = 0.0
+            unallocated['target_value'] = 0.0
+            unallocated['required_value'] = -unallocated['current_value']
+            unallocated['required_quantity'] = unallocated['current_quantity'].astype(int)
+            unallocated['required_transaction'] = 'sell'
+            unallocated['current_pct'] = unallocated['current_value'] / total_balance * 100
+            result = pd.concat([result, unallocated[result.columns]], ignore_index=True)
+
+        result = result.sort_values(by='required_value', ascending=True).reset_index(drop=True)
+        return result
+
+
+class OrderExecutor:
+    """리밸런싱 플랜에 따라 매도 → 매수 순서로 주문을 실행한다."""
+
+    def __init__(self, kis_client: KISClient, account_type: str, is_test: bool = False) -> None:
+        self.kis_client = kis_client
+        self.account_type = account_type
+        self.is_test = is_test
 
     @log_method_call
     def run_rebalancing(self, plan_df: pd.DataFrame) -> pd.DataFrame:
@@ -137,19 +204,26 @@ class StaticAllocator():
         # 계획 수량이 실제 가능 수량을 초과할 수 있으므로 min으로 제한
         transaction_qty = min(plan_row['required_quantity'], enable_qty)
 
-        if self.is_test is True:
-            response = {'msg1': 'TEST', 'rt_cd': '99'}
+        if self.is_test:
+            skipped_reason = 'test_mode'
+            response = None
         elif transaction_qty == 0:
-            response = {'msg1': '거래 가능 수량이 없습니다.', 'rt_cd': '99'}
+            skipped_reason = 'zero_quantity'
+            response = None
         else:
-            response = self.kis_client.create_domestic_order(plan_row['required_transaction'], plan_row['ticker'], ord_qty=transaction_qty, ord_dvsn='01')
+            skipped_reason = None
+            response = self.kis_client.create_domestic_order(
+                plan_row['required_transaction'], plan_row['ticker'],
+                ord_qty=transaction_qty, ord_dvsn='01',
+            )
 
         return {
             'ticker': plan_row['ticker'],
             'enable_quantity': enable_qty,
             'transaction_quantity': transaction_qty,
-            'is_success': response['rt_cd'] == '0',  # KIS API 성공 코드는 '0'
-            'response_msg': response['msg1'],
+            'skipped_reason': skipped_reason,
+            'is_success': response['rt_cd'] == '0' if response else None,  # KIS API 성공 코드는 '0'
+            'response_msg': response['msg1'] if response else None,
             'transaction_order': order_index,  # 실행 순서 (Google Sheets 기록용)
         }
 
@@ -180,49 +254,28 @@ class StaticAllocator():
             return int(self.kis_client.fetch_domestic_enable_sell(ticker=ticker)['ord_psbl_qty'])
         raise ValueError(f"transaction_type must be 'buy' or 'sell', got: {transaction_type!r}")
 
-    def get_rebalancing_plan(self) -> pd.DataFrame:
-        """현재 잔고와 목표 비중을 바탕으로 리밸런싱 플랜 DataFrame을 생성한다.
 
-        required_value 기준 오름차순 정렬로 sell이 앞에 오도록 한다.
-        (음수 required_value = sell, 양수 = buy)
-        """
-        allocation_info = self.allocation_info.copy()
-        allocation_info['current_price'] = allocation_info['ticker'].apply(self.kis_client.fetch_price)
+class StaticAllocator:
+    """목표 비중 기반 국내주식 정적 자산배분 실행기.
 
-        full_balance = self.kis_client.fetch_domestic_total_balance()
-
-        # stock_nm, current_price는 allocation_info 기준을 사용하므로 잔고에서 제거
-        balance_info = full_balance.drop(columns=['stock_nm', 'current_price'])
-
-        result = self._create_total_info(allocation=allocation_info, balance=balance_info)
-
-        # allocation에 없는 종목(CASH 제외)은 전량 매도 대상으로 추가
-        unallocated = full_balance[
-            ~full_balance['ticker'].isin(allocation_info['ticker']) &
-            (full_balance['ticker'] != 'CASH')
-        ].copy()
-        if not unallocated.empty:
-            logger.info('allocation 미등록 종목 전량 매도 대상: %s', unallocated['ticker'].tolist())
-            total_balance = full_balance['current_value'].sum()
-            unallocated['category_1'] = None
-            unallocated['category_2'] = None
-            unallocated['weight'] = 0.0
-            unallocated['target_value'] = 0.0
-            unallocated['required_value'] = -unallocated['current_value']
-            unallocated['required_quantity'] = unallocated['current_quantity'].astype(int)
-            unallocated['required_transaction'] = 'sell'
-            unallocated['current_pct'] = unallocated['current_value'] / total_balance * 100
-            result = pd.concat([result, unallocated[result.columns]], ignore_index=True)
-
-        result = result.sort_values(by='required_value', ascending=True).reset_index(drop=True)
-        return result
+    allocation_info(종목별 목표 비중)와 현재 잔고를 비교해
+    매수/매도 수량을 계산하고 주문을 실행한다.
+    """
+    @log_method_call
+    def __init__(self, account_type: str, allocation_info: pd.DataFrame, is_test: bool = False) -> None:
+        self.account_type = account_type
+        self.allocation_info = allocation_info
+        self.is_test = is_test
+        kis_client = KISClient(account_type)
+        self.planner = PortfolioPlanner(kis_client, allocation_info, account_type)
+        self.executor = OrderExecutor(kis_client, account_type, is_test)
 
     @log_method_call
     def run(self) -> pd.DataFrame:
         """리밸런싱 전체 플로우를 실행하고 플랜 + 실행 결과를 합산한 DataFrame을 반환한다."""
-        total_info = self.get_rebalancing_plan()
+        total_info = self.planner.get_rebalancing_plan()
         logger.info('total_info:\n%s', total_info.to_string())
         slack_notify(f'[{self.account_type}] 리밸런싱 플랜', _format_plan_for_slack(total_info))
-        trade_log = self.run_rebalancing(plan_df=total_info)
+        trade_log = self.executor.run_rebalancing(plan_df=total_info)
         # 플랜(total_info)과 실행 결과(trade_log)를 ticker 기준으로 합산해 반환
         return total_info.merge(trade_log, on='ticker', how='outer')
