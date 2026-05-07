@@ -347,6 +347,26 @@ class KISClient():
         return self._get("uapi/domestic-stock/v1/trading/inquire-psbl-order", "TTTC8908R", params).json()['output']
 
     @log_method_call
+    def fetch_buy_orderable_cash(self, ticker: str) -> int:
+        """실제 매수 가능 현금을 조회한다.
+
+        API의 nrcvb_buy_amt(미수 없는 매수 가능 금액) + ruse_psbl_amt(재사용 가능 금액)에
+        당일 매도 대금(T+2 미반영분)을 합산한다.
+        dnca_tot_amt(예수금 총금액)는 CMA 등 즉시 주문 불가 금액을 포함할 수 있어 사용하지 않는다.
+        """
+        enable = self.fetch_domestic_enable_buy(ticker=ticker, ord_dvsn='01')
+        nrcvb = int(enable['nrcvb_buy_amt']) + int(enable['ruse_psbl_amt'])
+        balance = self._domestic_balance_page()['output2'][0]
+        thdt_sll_amt = int(balance['thdt_sll_amt'])
+        total = nrcvb + thdt_sll_amt
+        logger.info(
+            'buy_orderable: nrcvb=%s, ruse=%s, thdt_sll=%s → %s원 (dnca_tot=%s)',
+            enable['nrcvb_buy_amt'], enable['ruse_psbl_amt'],
+            thdt_sll_amt, total, balance['dnca_tot_amt'],
+        )
+        return total
+
+    @log_method_call
     def fetch_domestic_enable_sell(self, ticker: str) -> dict:
         """국내주식 매도 가능 수량을 조회한다."""
         params = {
