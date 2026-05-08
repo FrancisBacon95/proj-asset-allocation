@@ -1,13 +1,15 @@
 import argparse
 from datetime import datetime
-import pandas as pd
 import pytz
+from dotenv import load_dotenv
+load_dotenv()
 
 from src.logger import get_logger
 from src.config.env import GOOGLE_SHEET_URL
 from src.sheets.client import GoogleSheetsClient
-from src.allocation import StaticAllocator, _format_result_for_slack
-from src.slack.client import slack_notify
+from src.bigquery.client import BigQueryClient
+from src.allocation import StaticAllocator
+from src.slack.client import slack_notify, format_rebalancing_summary
 
 logger = get_logger(__name__)
 
@@ -20,42 +22,42 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _is_already_executed(gs_client: GoogleSheetsClient, account_type: str, kst_date) -> bool:
-    trade_log_sheet = f'{account_type}_trade_log'
-    worksheet_titles = [ws.title for ws in gs_client.spreadsheet.worksheets()]
-    if trade_log_sheet not in worksheet_titles:
-        return False
-    trade_log_dates = pd.to_datetime(
-        gs_client.get_df_from_google_sheets(trade_log_sheet)['update_dt']
-    ).dt.date
-    if trade_log_dates.empty:
-        return False
-    return (kst_date - trade_log_dates.max()).days < 7
-
-
 def main() -> None:
     kst = pytz.timezone('Asia/Seoul')
-    kst_date = datetime.now(kst).date()
+    kst_now = datetime.now(kst)
+    kst_date = kst_now.date()
     args = _parse_args()
 
     gs_client = GoogleSheetsClient(url=GOOGLE_SHEET_URL)
+    bq_client = None if args.test else BigQueryClient()
+
     allocation_info = gs_client.get_df_from_google_sheets(f'{args.account_type}_allocation')
     allocation_info['ticker'] = allocation_info['ticker'].astype(str)
     allocation_info['weight'] = allocation_info['weight'].astype(float)
 
-    obj = StaticAllocator(account_type=args.account_type, allocation_info=allocation_info, is_test=args.test)
+    allocator = StaticAllocator(account_type=args.account_type, allocation_info=allocation_info, is_test=args.test)
 
-    is_market_open = obj.kis_client.is_trading_day(kst_date)
-    already_executed = _is_already_executed(gs_client, args.account_type, kst_date)
+    is_market_open = allocator.is_trading_day(kst_date)
+    already_executed = False if args.test else bq_client.is_already_executed(args.account_type, kst_date)
 
     logger.info('is_market_open: %s', is_market_open)
     logger.info('is_already_executed: %s', already_executed)
 
     if args.test or args.force or (is_market_open and not already_executed):
-        result = obj.run()
-        slack_notify(f'[{args.account_type}] 리밸런싱 결과', _format_result_for_slack(result))
-        if not args.test:
-            gs_client.write_worksheet(result, f'{args.account_type}_trade_log')
+        result, remaining_cash = allocator.run()
+
+        trade_log_url = gs_client.get_worksheet_url(f'{args.account_type}_trade_log')
+        summary = format_rebalancing_summary(
+            result_df=result,
+            remaining_cash=remaining_cash,
+            account_type=args.account_type,
+            dt=kst_now,
+            trade_log_url=trade_log_url,
+        )
+        slack_notify(f'[{args.account_type}] 리밸런싱 완료', summary)
+
+        if bq_client is not None:
+            bq_client.append_trade_log(result, account_type=args.account_type)
 
 
 if __name__ == '__main__':
