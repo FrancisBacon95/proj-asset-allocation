@@ -1,3 +1,19 @@
+"""리밸런싱 자동화 진입점.
+
+핵심 흐름 (자세한 다이어그램은 docs/ARCHITECTURE.md):
+1. 실행 모드 결정 (ARCH-002):
+   - --force: is_trading_day / is_already_executed 외부 호출 자체 스킵
+   - --test:  is_already_executed만 스킵, 주문/BQ 적재 모두 미실행
+   - 일반:    is_trading_day AND NOT is_already_executed
+2. run_id 발급 (uuid4 hex, ARCH-003) + BQ에 'started' marker 적재 (sentinel)
+3. StaticAllocator.run() — 일반 계좌는 매도→대기→매수 주문, IRP는 plan만 반환
+4. 결과 발송:
+   - 일반: format_rebalancing_summary(전·후 분모 분리, ARCH-006) + BigQuery 적재 + 'completed' marker
+   - IRP:  format_irp_plan_summary + Sheets {account_type}_action_plan 덮어쓰기 (BQ 미적재)
+
+좀비 run 자동 stale: started marker 30분 경과 후 completed/trade row가 없으면
+다음 cron이 자동 재시도 (BigQueryClient.is_already_executed 참조).
+"""
 import argparse
 import uuid
 from datetime import datetime

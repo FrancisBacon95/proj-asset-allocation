@@ -1,3 +1,16 @@
+"""포트폴리오 플래너.
+
+현재 잔고(KIS API)와 목표 비중(Sheets)을 비교해 리밸런싱 계획을 수립한다.
+순수 계산만 수행 — 외부 부작용(주문, 알림) 없음.
+
+핵심 설계:
+- 정책 주입 (ARCH-007): `ExecutionPolicy.buffer_cash`로 거래 후 보존 현금을
+  반영해 target_value를 산출 (총평가금액에서 buffer 차감 후 비중 적용).
+- allocation 미등록 종목은 자동으로 전량 매도 계획에 포함.
+- weight 합계 > 1.0, 음수, 중복 ticker 등 사전 검증.
+- `current_pct`는 buffer 미차감 총자산 기준으로 계산 (Slack 후 비중 분모와 일치
+  하도록 보존, ARCH-006).
+"""
 from typing import Optional
 
 import pandas as pd

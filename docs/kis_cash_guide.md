@@ -218,6 +218,30 @@ available = prvs_rcdl_excc_amt
 
 ---
 
+## 7.1 매수 잔여 현금 추적 메커니즘 (Phase B)
+
+리밸런싱 매수 루프는 KIS 호출 사이에 우리 코드가 잔여 현금을 직접 추적한다. 이때 사용하는 안전장치는 다음 세 가지로, 각각 의도가 다르다.
+
+### (a) `ExecutionPolicy.buffer_cash` (ARCH-007) — 거래 후 보존 현금
+- **위치**: `src/policy.py`. 기본 10,000원.
+- **적용**: `PortfolioPlanner`가 `target_value` 계산 시 총평가금액에서 `buffer_cash`를 차감해 매수 한도를 줄인다. → 거래 후에도 최소 buffer_cash가 예수금에 남도록.
+- **의의**: 수수료/세금/ETF 호가 단위 라운딩 등 미세 잔여를 흡수해 마지막 1주가 미수 거부되는 것을 방지.
+
+### (b) `ExecutionPolicy.buy_cash_safety_ratio` (ARCH-007) — 보수단가 안전 마진
+- **위치**: `src/executor.py:_get_orderable_qty`. 기본 0.99.
+- **적용**: `available_amt = cash_balance × ratio`로 가용 현금을 1% 깎고 `psbl_qty_calc_unpr`(KIS 보수단가)로 나눠 가능 수량 산출.
+- **의의**: KIS 보수단가가 실제 체결가보다 높을 때도 우리 추적 잔여가 KIS 잔여를 초과하지 않도록.
+
+### (c) `filled_quantity * calc_price` 차감 (ARCH-008) — 실패 주문 보호
+- **위치**: `src/executor.py:run_rebalancing` 매수 루프.
+- **적용**: 잔여 현금 차감을 `requested_quantity`(KIS에 보낸 수량) 아니라 `filled_quantity`(rt_cd='0' 성공 시 체결 수량) 기준으로. KIS 거절·실패 주문은 filled=0이라 차감 0 → 잔여 보존.
+- **의의**: 부분 실패 시 후속 주문이 부정확한 현금 기준으로 계산되는 것을 차단.
+
+### KIS 응답 안전 처리 (ARCH-005)
+모든 KIS HTTP 호출은 `KISAPIError` 도메인 예외로 통일된 단일 헬퍼 경로(`_request` → `_parse_json` → `_check_rt_cd`)를 통과한다. 네트워크 timeout, JSON 파싱 실패, KIS rt_cd 비정상이 모두 같은 예외 타입으로 surface돼 운영 진단이 일관된다 (자세한 내용은 `src/kis/client.py` 모듈 docstring).
+
+---
+
 ## 8. 자주 헷갈리는 점
 
 - **`dnca_tot_amt`는 "총" 예수금이지만 미래 정산은 포함하지 않는다.** "총금액"이라는 이름에 속지 말 것. T+0 시점의 결제 완료분만 가리킨다.

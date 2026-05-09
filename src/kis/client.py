@@ -1,6 +1,22 @@
-'''
-한국투자증권 REST API 클라이언트
-'''
+"""한국투자증권 REST API 클라이언트.
+
+핵심 설계:
+- HTTP 견고성 (ARCH-005): 모든 KIS 호출은 단일 헬퍼 경로(`_request` → `_parse_json`
+  → `_check_rt_cd`)를 통과한다. 네트워크 timeout, raise_for_status, JSON 파싱 실패,
+  KIS rt_cd 비정상 모두 `KISAPIError` 도메인 예외로 통일. 민감 정보(헤더·앱키)는
+  노출하지 않고 path/tr_id/HTTP status/rt_cd/msg1만 보존.
+
+- 토큰 캐시 (ARCH-011): pickle 폐기, JSON 형식(`kis_token_*.json`). 캐시에는
+  access_token + expires_at(epoch)만 포함, app_key/app_secret은 캐시에서 제외.
+  손상된 캐시는 자동 폐기 → 재발급 트리거. 파일 권한 0600 (best-effort).
+
+- 계좌 분기 (postfix 기반): `is_irp()` (= `_is_pension()` alias) — IRP(='29')만
+  KIS 퇴직연금 전용 엔드포인트(TTTC2208R, TTTC0503R) 사용. ISA('01')와 연금저축
+  PPA('22')은 일반 위탁 엔드포인트 공유. 자세한 내용은 docs/kis_cash_guide.md §4.2.
+
+- 응답 형식 정규화: `_normalize_output1/output2`로 ISA(list)/IRP(dict) 응답 차이를
+  통일. `_require_int / _optional_int`로 silent failure 방지.
+"""
 import os
 import requests
 import json

@@ -78,6 +78,19 @@ BQ_DATASET_ID=asset_allocation
 
 일반 계좌의 거래 이력은 BigQuery `trade_log` 테이블에 자동 적재됩니다. 첫 실행 시 테이블이 없으면 자동 생성됩니다. Sheets에서 거래 이력을 조회하려면 Google Sheets의 **데이터 연결 추가 → BigQuery** 기능으로 연결하세요.
 
+#### `trade_log` 핵심 컬럼 (ARCH-003 / ARCH-004)
+
+| 컬럼 | 설명 |
+|---|---|
+| `run_id` | 실행 단위 식별자 (uuid4 hex). 같은 실행의 marker + trade row는 동일 run_id 그룹 |
+| `row_type` | `'run_marker'` (sentinel) / `'trade'` (거래 결과) / NULL (마이그레이션 전 옛날 행) |
+| `run_status` | run_marker 행만: `'started'` / `'completed'` |
+| `requested_quantity` | KIS에 실제로 보낸 주문 수량 |
+| `filled_quantity` | rt_cd='0' 성공 시 체결 수량, 실패는 0 |
+| `transaction_quantity` | deprecated alias = `filled_quantity` (3개월 후 제거) |
+
+새 컬럼은 `LoadJobConfig.schema_update_options=ALLOW_FIELD_ADDITION`으로 첫 적재 시 BQ가 자동 추가합니다 (ALTER 직접 실행 불필요).
+
 ---
 
 ## 실행
@@ -95,42 +108,63 @@ uv run python main.py --account_type ISA
 | 플래그 | 동작 |
 |---|---|
 | `--account_type` | 실행할 계좌 타입 (필수, `kis_api_auth.json` 키와 일치) |
-| `--test` | KIS 조회 API는 호출하지만 실제 주문 없음, BigQuery 미기록 |
-| `--force` | 실행 조건에서 거래일/최근 실행 여부를 무시하고 주문 단계로 진행. 현재 구현은 이 플래그를 판단하기 전에 Sheets/KIS/BigQuery 초기화와 일부 조회를 수행함 |
+| `--test` | KIS 조회 API는 호출하지만 실제 주문 없음, BigQuery 미기록. `is_already_executed` 조회도 스킵 |
+| `--force` | **실행 조건 외부 조회(거래일/중복 실행 여부) 자체를 스킵**하고 즉시 주문 단계로 진입. 외부 API 장애와도 무관 (ARCH-002) |
 
 ### 실행 조건
 
 아래 세 조건 중 하나를 만족해야 리밸런싱이 실행됩니다.
 
 1. `--test` 플래그
-2. `--force` 플래그
-3. 오늘이 거래일이고, 최근 7일 이내 동일 `account_type`으로 실행된 이력이 없음
+2. `--force` 플래그 — 외부 조건 무시 (Sheets/KIS/BigQuery 초기화는 여전히 필요)
+3. 오늘이 거래일이고, 최근 7일 이내 동일 `account_type`으로 진행 중이거나 완료된 run이 없음
 
-주의: 현재 구현상 `--force`는 실행 조건 가드만 우회한다. 초기화와 사전 조회 장애까지 모두 우회하지는 않는다.
+`is_already_executed`는 BigQuery `trade_log`를 run_id 단위로 그룹핑해 다음 중 하나라도 있으면 차단합니다 (ARCH-003):
+- 정상 완료된 run (trade row 또는 `run_status='completed'` marker)
+- 진행 중인 run (`started` marker가 30분 미경과)
+
+**좀비 자동 stale**: `started` marker 후 30분 지났는데 `completed`/trade row가 없으면 좀비 run으로 판정 → 차단 해제 → 다음 cron 자동 재시도 (개발자 수동 정리 불필요).
+
+IRP 계좌(postfix='29')는 BigQuery 거래 이력을 적재하지 않으므로 `is_already_executed` 체크 자체를 스킵합니다. 빈도 제어는 외부 cron(예: Cloud Run 매달 1일)에 위임합니다.
 
 ---
 
 ## 프로젝트 구조
 
 ```
-main.py                  # 진입점 — 실행 조건 판단 및 결과 발송
+main.py                  # 진입점 — run_id 발급, 실행 조건 판단, run_marker 적재, 결과 발송
 src/
-├── allocation.py        # StaticAllocator — 플래너/실행기를 조합하는 파사드
+├── allocation.py        # StaticAllocator — Planner/Executor 조합 파사드 + ExecutionPolicy 주입
 ├── planner.py           # PortfolioPlanner — 현재 잔고와 목표 비중 비교, 리밸런싱 계획 수립
-├── executor.py          # OrderExecutor — 매도/매수 주문 실행, 잔여 예수금 반환
+├── executor.py          # OrderExecutor — 매도/매수 주문 실행, requested/filled 분리, 실패 차감 보호
+├── policy.py            # ExecutionPolicy dataclass + DEFAULT_EXECUTION_POLICY (ARCH-007)
 ├── logger.py            # 로깅 설정 및 log_method_call 데코레이터
 ├── bigquery/
-│   └── client.py        # BigQueryClient — 거래 이력 적재(WRITE_APPEND), 중복 실행 방지 조회
+│   └── client.py        # BigQueryClient — append_trade_log, append_run_marker, stale 자동 처리
 ├── config/
 │   └── env.py           # 환경변수 로딩, KISAuthConfig 파싱
 ├── kis/
-│   ├── client.py        # KISClient — 한국투자증권 REST API 래퍼
+│   ├── client.py        # KISClient — KIS REST 래퍼 + KISAPIError 도메인 예외 + 토큰 캐시(JSON)
 │   └── stock_config.py  # 거래소 코드 및 통화 상수
 ├── sheets/
-│   └── client.py        # GoogleSheetsClient — 목표 비중 읽기, IRP action plan 쓰기
+│   └── client.py        # GoogleSheetsClient — 목표 비중 읽기, IRP action plan 쓰기 (트랜잭션 안전)
 └── slack/
-    └── client.py        # SlackClient — 리밸런싱 요약 메시지 발송
+    └── client.py        # SlackClient — 전·후 분모 분리 요약, IRP plan 요약
 ```
+
+### 실행 정책 변경 (ExecutionPolicy)
+
+기본값(`buffer_cash=10,000`, `sell_to_buy_wait_seconds=3`, `buy_cash_safety_ratio=0.99`)은 `src/policy.py`의 `DEFAULT_EXECUTION_POLICY`에 정의됩니다. 계좌별 정책을 다르게 운영하려면:
+
+```python
+from src.policy import ExecutionPolicy
+from src.allocation import StaticAllocator
+
+custom_policy = ExecutionPolicy(buffer_cash=50_000, buy_cash_safety_ratio=0.95)
+allocator = StaticAllocator(account_type='ISA', allocation_info=..., policy=custom_policy)
+```
+
+`StaticAllocator`는 시작 시 활성 정책을 로그로 남깁니다.
 
 ---
 

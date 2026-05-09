@@ -1,6 +1,39 @@
 # 리팩토링 계획
 
-> 상태: 과거 리팩토링 계획 문서다. 주요 구조 분리와 BigQuery 적재는 현재 코드에 반영되었지만, 이후 IRP action plan 쓰기 기능과 운영 리스크가 추가되었다. 현재 상태와 남은 개선점은 `docs/ARCHITECTURE.md`와 `audits/`의 최신 스냅샷을 우선 참고한다.
+> 상태: 과거 리팩토링 계획 문서다. 주요 구조 분리, BigQuery 적재, IRP action plan 쓰기, **Phase A·B 보안·운영 안정화(ARCH-001~011)** 까지 모두 반영되었다. 현재 상태와 남은 개선점은 `docs/ARCHITECTURE.md`와 `audits/`의 최신 스냅샷을 우선 참고한다.
+
+---
+
+## Phase A·B 처리 결과 (2026-05-09)
+
+audits `2026-05-09_1730-kst_architecture/findings.md`의 9개 항목 모두 resolved:
+
+| ID | 주제 | 처리 commit |
+|---|---|---|
+| ARCH-001 | Docker 빌드 컨텍스트 비밀파일 제외 | `51b33c7` |
+| ARCH-002 | `--force` 외부 조회 스킵 | `df882fa` |
+| ARCH-003 | run_id + run_marker sentinel + stale 자동 처리 | `df882fa`, `7c43866` |
+| ARCH-004 | requested/filled quantity 분리 | `df882fa` |
+| ARCH-005 | KIS HTTP 견고성(timeout+raise_for_status+rt_cd 검증+KISAPIError) | `df882fa` |
+| ARCH-006 | Slack 비중 분모 분리 + filled_quantity 기준 후 비중 | `df882fa` |
+| ARCH-007 | ExecutionPolicy dataclass + 정책 주입 | `df882fa` |
+| ARCH-008 | 실패 주문 현금 차감 보호(filled_quantity * calc_price) | `df882fa` |
+| ARCH-011 | 토큰 캐시 pickle→JSON, app_secret/app_key 캐시 제거 | `51b33c7` |
+
+상세 변경은 `audits/2026-05-09_1730-kst_architecture/findings.md` 항목별 "처리 내용" 참조.
+
+---
+
+## 남은 backlog (follow-up)
+
+다음 항목은 운영 영향이 작아 backlog로 보류:
+
+- **부분 체결 정확도 강화** (P1 #3): 시장가 ETF는 즉시 체결이 일반적이라 미미. 별도 체결조회 API로 정확도 강화는 follow-up.
+- **`transaction_quantity` alias 제거** (P3): 외부 수신부 호환을 위해 3개월 유예 후 제거.
+- **`tr_cont` KeyError → KISAPIError 표준화** (P2 #7): 응답 깨짐은 raw KeyError로 충분히 가시화됨. 일관성 위해 표준화 가능.
+- **`current_price` 기준 후 비중 drift** (P1 #5): 의도된 단순화. 미미.
+
+---
 
 ## 배경 및 목표
 

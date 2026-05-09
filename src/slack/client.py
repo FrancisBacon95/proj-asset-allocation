@@ -1,3 +1,15 @@
+"""Slack 알림 클라이언트.
+
+리밸런싱 결과를 Slack mrkdwn 메시지로 발송한다.
+
+핵심 설계:
+- 일반 계좌 (`format_rebalancing_summary`, ARCH-006): 전·후 분모를 명시 분리.
+  전 = (전 주식 평가 + 전 예수금), 후 = (후 주식 평가 + 잔여 예수금). 후 비중은
+  `filled_quantity` 기준 (요청 수량 아님). planner의 `current_pct`는 보존.
+- IRP (`format_irp_plan_summary`): 거래 없이 plan만 생성됨을 명시. 매수/매도
+  카운트 + 종목 액션 + Sheets URL 포함. 필수 컬럼 누락 시 KeyError 즉시 실패
+  (silent failure 방지). required_quantity=0 종목은 출력에서 제외.
+"""
 from datetime import datetime
 
 import pandas as pd

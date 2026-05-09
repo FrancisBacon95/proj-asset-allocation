@@ -1,3 +1,19 @@
+"""주문 실행기.
+
+리밸런싱 플랜에 따라 KIS API로 매도/매수 주문을 실행한다.
+매도→대기→매수 순서를 강제해 매도 체결 → 예수금 반영 → 매수 흐름을 보장한다.
+
+핵심 설계:
+- 정책 주입 (ARCH-007): `ExecutionPolicy`에서 `sell_to_buy_wait_seconds`,
+  `buy_cash_safety_ratio`를 받아 사용. 모듈 상수는 deprecated alias로만 유지.
+- requested/filled 분리 (ARCH-004): `requested_quantity`(KIS에 보낸 수량) /
+  `filled_quantity`(rt_cd='0' 성공 시 체결 수량)를 별도 컬럼으로 출력.
+  `transaction_quantity`는 deprecated alias = filled (3개월 후 제거).
+- 실패 주문 차감 보호 (ARCH-008): 매수 루프의 잔여 차감을 `filled * calc_price`로
+  계산. 실패 주문은 filled=0이라 차감 0 → 잔여 보존.
+- is_test=True: KIS 호출 자체 스킵, requested=filled=0. 의도 수량은
+  plan_row['required_quantity'] 입력값에 보존.
+"""
 import time
 from typing import Optional
 import pandas as pd

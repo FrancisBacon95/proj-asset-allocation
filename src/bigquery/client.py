@@ -1,3 +1,18 @@
+"""BigQuery 거래 이력 적재 및 중복 실행 방지 (ARCH-003).
+
+핵심 설계:
+- run_id + row_type sentinel: 모든 trade row는 `run_id` + `row_type='trade'`로
+  라벨. main.py가 주문 직전·후에 `append_run_marker()`로 `row_type='run_marker'`
+  + `run_status='started'/'completed'` sentinel을 적재.
+- `is_already_executed`: run_id 단위로 그룹핑한 후 다음 중 하나라도 만족하면
+  차단 — (a) 정상 완료(trade 또는 completed marker), (b) 진행 중(started 후
+  STALE_MINUTES=30분 미경과), (c) row_type IS NULL (마이그레이션 전 행).
+- 좀비 자동 stale: started 후 30분 지났는데 completed/trade가 없으면 좀비로
+  판정 → 다음 cron 자동 재시도 (개발자 수동 정리 불필요).
+- 스키마 자동 확장: `LoadJobConfig.schema_update_options=ALLOW_FIELD_ADDITION`
+  로 신규 컬럼(run_id/row_type/run_status/requested_quantity/filled_quantity)을
+  첫 적재 시 BQ가 자동 추가 (ALTER 직접 실행 불필요).
+"""
 from datetime import datetime, timedelta
 
 import pandas as pd

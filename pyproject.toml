@@ -1,7 +1,7 @@
 [project]
 name = "proj-asset-allocation"
 version = "0.1.0"
-description = "Add your description here"
+description = "KIS API 기반 자동 자산 리밸런싱 시스템 — ISA·연금저축(PPA)·IRP 분기, BigQuery 이력 적재, Slack 통합 발송"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

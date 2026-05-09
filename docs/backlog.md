@@ -4,6 +4,25 @@
 
 ---
 
+## [Phase B follow-up] Codex 리뷰에서 보류 처리한 항목
+
+### 부분 체결 정확도 강화 (P1 #3)
+- 현재: 시장가 ETF는 즉시 100% 체결이 일반적이라 `filled_quantity = transaction_qty if rt_cd=='0' else 0`으로 충분.
+- 개선: 별도 체결조회 API(`uapi/domestic-stock/v1/trading/inquire-daily-ccld` 등)로 실제 체결 수량을 정확히 확인해 부분 체결도 반영.
+- 우선순위: 낮음. 시장가 ETF에서 부분 체결 사례 발견 시 진행.
+
+### `transaction_quantity` deprecated alias 제거
+- 현재: `requested_quantity` / `filled_quantity` (ARCH-004) 도입했으나 `transaction_quantity`를 alias = `filled_quantity`로 유지 (외부 수신부 호환).
+- 개선: 3개월 유예 후 (2026-08 이후) alias 제거. BigQuery `trade_log`에서 컬럼 자체 제거는 schema_update_options로 자동 처리되지 않으므로 수동 ALTER 또는 view로 마이그레이션.
+- 우선순위: 중간. Slack/BigQuery/Sheets 외부 수신부에서 `transaction_quantity` 참조 코드 모두 제거된 시점에 진행.
+
+### KIS HTTP `tr_cont` 누락을 KISAPIError로 표준화 (P2 #7)
+- 현재: KIS 응답에 `tr_cont` 헤더가 없으면 raw KeyError로 노출 (`src/kis/client.py` 페이지네이션 경로).
+- 개선: ARCH-005 `_check_rt_cd`와 동일하게 `KISAPIError` 도메인 예외로 변환.
+- 우선순위: 낮음. 현재 raw KeyError로도 운영 진단에 충분.
+
+---
+
 ## [아키텍처] allocation 설정 DB 이관 + Google Sheets를 UI 미들웨어로
 
 ### 현재 구조

@@ -1,3 +1,17 @@
+"""Google Sheets 클라이언트.
+
+`{account_type}_allocation` 시트에서 목표 비중을 읽고, IRP 계좌 실행 시
+`{account_type}_action_plan` 시트를 덮어쓴다.
+
+핵심 설계:
+- OAuth scope: `spreadsheets` (read+write). IRP action plan 쓰기 때문에
+  readonly로는 동작 안 함.
+- `overwrite_dataframe` 트랜잭션 안전: clear→update가 아니라 update→trailing
+  batch_clear 순서. update 실패 시 batch_clear 미호출 → 기존 시트 데이터 보존.
+- NaN/None은 빈 문자열로 변환해 'NaN' 문자열이 시트에 박히는 것을 방지.
+- 빈 DataFrame이어도 헤더는 기록 (스키마 보존).
+- 신규 시트는 add_worksheet로 자동 생성 (rows≥100, cols≥10 여유분 확보).
+"""
 import pandas as pd
 import gspread
 from google.auth import default

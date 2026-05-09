@@ -1,3 +1,16 @@
+"""정적 자산 배분 파사드.
+
+`PortfolioPlanner`(계산)와 `OrderExecutor`(실행)를 조합해 main.py에서 호출하는
+단일 진입점을 제공한다.
+
+핵심 설계:
+- 정책 주입 (ARCH-007): `ExecutionPolicy`(미주입 시 `DEFAULT_EXECUTION_POLICY`)
+  을 받아 Planner와 Executor에 동일 정책을 주입. 시작 시 활성 정책 값을
+  logger.info로 남김.
+- IRP 분기: `kis_client.is_irp()`이면 executor 호출 자체를 스킵하고 plan_df만
+  반환 (반환 시그니처는 `(plan_df, 0)` 동일 유지). main.py가 IRP plan을 Sheets
+  `{account_type}_action_plan`으로 덮어쓴다.
+"""
 from typing import Optional
 
 import pandas as pd
