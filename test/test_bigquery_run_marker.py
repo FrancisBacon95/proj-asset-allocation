@@ -164,6 +164,59 @@ def test_is_already_executed_returns_false_when_count_zero():
     print('✅ is_already_executed: count=0 → False')
 
 
+# ---------------------------------------------------------------------------- #
+# Codex P0 #1+#2 — stale window 자동 처리                                       #
+# ---------------------------------------------------------------------------- #
+
+def test_is_already_executed_query_uses_stale_window_logic():
+    """SQL이 has_terminal/started_at/STALE_MINUTES를 활용한 좀비 처리 로직을 포함한다."""
+    from src.bigquery.client import STALE_MINUTES
+    bq = _make_bq_client()
+    fake_result = MagicMock()
+    fake_result.__iter__ = lambda self: iter([MagicMock(cnt=0)])
+    bq.client.query.return_value.result.return_value = fake_result
+
+    bq.is_already_executed(account_type='ISA', target_date=date(2026, 5, 9))
+
+    sql = bq.client.query.call_args.args[0]
+    # 좀비 처리 핵심 요소들이 SQL에 포함됨
+    assert 'has_terminal' in sql, '좀비 판정용 has_terminal 컬럼 누락'
+    assert 'started_at' in sql, '좀비 판정용 started_at 누락'
+    assert 'TIMESTAMP_DIFF' in sql, 'STALE_MINUTES 비교 누락'
+    assert '@stale_minutes' in sql, 'stale_minutes 파라미터 바인딩 누락'
+
+    # 파라미터에 stale_minutes 포함됨
+    job_config = bq.client.query.call_args.kwargs['job_config']
+    param_names = [p.name for p in job_config.query_parameters]
+    assert 'stale_minutes' in param_names
+    stale_param = next(p for p in job_config.query_parameters if p.name == 'stale_minutes')
+    assert stale_param.value == STALE_MINUTES, f'STALE_MINUTES 값 일치 검증, 실제 {stale_param.value}'
+    print(f'✅ is_already_executed: stale window 로직 + STALE_MINUTES={STALE_MINUTES} 파라미터 바인딩')
+
+
+def test_stale_minutes_constant_is_30():
+    """STALE_MINUTES 모듈 상수가 30분으로 정의됨 (Codex P0 권고치)."""
+    from src.bigquery.client import STALE_MINUTES
+    assert STALE_MINUTES == 30, f'STALE_MINUTES 기대 30, 실제 {STALE_MINUTES}'
+    print('✅ STALE_MINUTES = 30 (Codex P0 권고치)')
+
+
+def test_is_already_executed_blocks_when_runs_present():
+    """has_terminal=1 또는 stale 미경과 run이 카운트되면 True (차단).
+
+    BQ 쿼리 자체의 정확성은 BQ 엔진이 검증. 본 테스트는 cnt > 0 → True 매핑 검증.
+    SQL에 좀비 처리 로직이 포함됐는지는 별도 케이스에서 검증.
+    """
+    bq = _make_bq_client()
+    fake_result = MagicMock()
+    fake_result.__iter__ = lambda self: iter([MagicMock(cnt=2)])  # 2개 run이 차단 조건 만족
+    bq.client.query.return_value.result.return_value = fake_result
+
+    result = bq.is_already_executed(account_type='ISA', target_date=date(2026, 5, 9))
+    assert result is True, 'cnt > 0 → True (정상 완료 또는 진행 중인 run 존재)'
+    print('✅ is_already_executed: 차단 조건 만족 run 있음 → True')
+
+
 if __name__ == '__main__':
     test_append_trade_log_attaches_run_id_and_row_type()
     test_append_trade_log_without_run_id_omits_column()
@@ -173,4 +226,8 @@ if __name__ == '__main__':
     test_is_already_executed_includes_row_type_filter()
     test_is_already_executed_returns_true_for_running_run_marker()
     test_is_already_executed_returns_false_when_count_zero()
+    # Codex P0 #1+#2: stale window
+    test_is_already_executed_query_uses_stale_window_logic()
+    test_stale_minutes_constant_is_30()
+    test_is_already_executed_blocks_when_runs_present()
     print('\n전체 테스트 통과')

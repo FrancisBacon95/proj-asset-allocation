@@ -130,6 +130,24 @@ def test_execute_order_zero_quantity_skips():
     print('✅ 2-2 _execute_order zero_quantity: requested=0, filled=0, 주문 미호출')
 
 
+def test_execute_order_response_without_msg1():
+    """P1 #4: KIS 실패 응답에 msg1 부재 시 KeyError 없이 response_msg=None 반환."""
+    ex = _make_executor()
+    plan_row = {
+        'ticker': '005930', 'required_quantity': 100,
+        'required_transaction': 'buy', 'current_price': 10000,
+    }
+    # 비정상 응답: rt_cd='1' (실패) + msg1 부재
+    mock_order = MagicMock(return_value={'rt_cd': '1'})  # msg1 누락
+    with patch.object(ex, '_get_orderable_qty', return_value=(50, 10_000)), \
+         patch.object(type(ex.kis_client), 'create_domestic_order', mock_order):
+        result = ex._execute_order(plan_row, order_index=0, available_cash=1_000_000)
+    assert result['is_success'] is False
+    assert result['response_msg'] is None, 'msg1 부재 시 response_msg=None (KeyError 방지)'
+    assert result['filled_quantity'] == 0
+    print('✅ P1 #4: KIS 응답에 msg1 부재해도 KeyError 없이 response_msg=None')
+
+
 def test_execute_order_failed_order_filled_zero():
     """2-3 신규 (ARCH-004 + ARCH-008): KIS 응답 rt_cd != '0'일 때 requested>0, filled=0."""
     ex = _make_executor()
@@ -332,6 +350,7 @@ if __name__ == '__main__':
     test_orderable_qty_insufficient_cash()
     test_execute_order_required_exceeds_enable()
     test_execute_order_zero_quantity_skips()
+    test_execute_order_response_without_msg1()
     test_execute_order_failed_order_filled_zero()
     test_execute_order_test_mode_skips_real_order()
     test_run_rebalancing_remaining_cash_decremented()

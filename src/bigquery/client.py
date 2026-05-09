@@ -14,6 +14,12 @@ logger = get_logger(__name__)
 
 _BQ_SCOPES = ['https://www.googleapis.com/auth/bigquery']
 
+# 좀비 run 자동 stale 처리 임계 (ARCH-003 후속, Codex P0 #1+#2).
+# started marker만 있고 STALE_MINUTES 지나도 completed/trade row가 없으면
+# 진행 중이 아니라 좀비로 판정 → is_already_executed=False → 다음 cron 재시도 가능.
+# 향후 ExecutionPolicy로 옮길 수 있게 모듈 상수로 보관.
+STALE_MINUTES = 30
+
 
 class BigQueryClient:
     def __init__(self) -> None:
@@ -98,9 +104,13 @@ class BigQueryClient:
     def is_already_executed(self, account_type: str, target_date, within_days: int = 7) -> bool:
         """trade_log 테이블에서 account_type 기준으로 within_days 이내 실행 여부를 조회.
 
-        ARCH-003: row_type 필터 추가. trade row 또는 run_marker(started/completed)
-        둘 중 하나만 있어도 "실행됨"으로 인지한다 (진행 중인 run도 중복 실행 방지).
-        row_type IS NULL 허용은 마이그레이션 전 기존 행 호환용.
+        ARCH-003 + Codex P0 #1·#2: run_id 단위로 그룹핑한 후 다음 중 하나라도 해당하면 차단:
+        - (a) trade row 또는 completed marker가 있음 → 정상 완료 run
+        - (b) started marker만 있고 STALE_MINUTES 안 지남 → 진행 중인 run (동시 실행 방지)
+        - (c) row_type IS NULL인 옛날 행 → 마이그레이션 전 호환
+
+        started 후 STALE_MINUTES(30분) 지났는데 completed/trade가 없으면 좀비 run으로
+        판정하여 다음 cron이 재시도 가능 (개발자 수동 정리 불필요).
         """
         cutoff = (
             datetime.combine(target_date, datetime.min.time()) - timedelta(days=within_days - 1)
@@ -110,16 +120,34 @@ class BigQueryClient:
         cutoff_str = cutoff.strftime('%Y-%m-%d') if hasattr(cutoff, 'strftime') else str(cutoff)
 
         query = f"""
+            WITH runs AS (
+              SELECT
+                run_id,
+                MAX(IF(row_type='trade' OR run_status='completed', 1, 0)) AS has_terminal,
+                MIN(IF(run_status='started', update_dt, NULL)) AS started_at
+              FROM `{self._table_ref}`
+              WHERE account_type = @account_type
+                AND DATE(update_dt) >= @cutoff_date
+                AND (row_type IN ('run_marker','trade') OR row_type IS NULL)
+              GROUP BY run_id
+            )
             SELECT COUNT(*) AS cnt
-            FROM `{self._table_ref}`
-            WHERE account_type = @account_type
-              AND DATE(update_dt) >= @cutoff_date
-              AND (row_type IN ('run_marker','trade') OR row_type IS NULL)
+            FROM runs
+            WHERE
+              -- (a) 정상 완료: trade row 또는 completed marker
+              has_terminal = 1
+              -- (b) started 후 STALE_MINUTES 미경과 (진행 중)
+              OR (has_terminal = 0
+                  AND started_at IS NOT NULL
+                  AND TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), started_at, MINUTE) < @stale_minutes)
+              -- (c) 마이그레이션 전 옛날 행 (run_id NULL)
+              OR run_id IS NULL
         """
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ScalarQueryParameter('account_type', 'STRING', account_type),
                 bigquery.ScalarQueryParameter('cutoff_date', 'DATE', cutoff_str),
+                bigquery.ScalarQueryParameter('stale_minutes', 'INT64', STALE_MINUTES),
             ]
         )
 
@@ -128,8 +156,8 @@ class BigQueryClient:
             row = next(iter(result))
             executed = row.cnt > 0
             logger.info(
-                'is_already_executed(%s, within=%d days): %s (count=%d)',
-                account_type, within_days, executed, row.cnt,
+                'is_already_executed(%s, within=%d days, stale=%dmin): %s (count=%d)',
+                account_type, within_days, STALE_MINUTES, executed, row.cnt,
             )
             return executed
         except NotFound:

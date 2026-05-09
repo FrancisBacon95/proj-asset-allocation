@@ -93,13 +93,16 @@ class OrderExecutor:
         # 계획 수량이 실제 가능 수량을 초과할 수 있으므로 min으로 제한
         transaction_qty = min(plan_row['required_quantity'], enable_qty)
 
-        # requested_quantity: 우리가 KIS에 요청한 수량 (is_test=True여도 실제로 요청한 의도 수량 보존)
-        # filled_quantity: KIS 응답 rt_cd='0'으로 성공한 경우만 transaction_qty, 그 외 0
+        # requested_quantity: KIS에 실제로 보낸 주문 수량.
+        # filled_quantity: KIS 응답 rt_cd='0' 성공 시만 transaction_qty, 그 외 0.
+        # 의도 수량(원래 매매 계획)은 plan_row['required_quantity']에 그대로 보존됨.
         requested_qty = transaction_qty
         if self.is_test:
+            # is_test=True: KIS 호출 자체를 안 하므로 requested/filled 모두 0.
+            # 의도 수량은 plan_row['required_quantity']에 보존되며, 별도 컬럼 아닌 입력값으로 추적.
             skipped_reason = 'test_mode'
-            transaction_qty = 0  # 실제 체결 없음 → 후 비중 계산 시 변화 없도록
-            requested_qty = 0    # is_test에서는 KIS에도 요청 안 했으므로 requested도 0
+            transaction_qty = 0
+            requested_qty = 0
             response = None
         elif transaction_qty == 0:
             skipped_reason = 'zero_quantity'
@@ -125,7 +128,8 @@ class OrderExecutor:
             'calc_price': calc_price,
             'skipped_reason': skipped_reason,
             'is_success': is_success,
-            'response_msg': response['msg1'] if response else None,
+            # P1 #4: KIS 실패 응답에 msg1 부재 가능 → .get()으로 KeyError 방지
+            'response_msg': response.get('msg1') if response else None,
             'transaction_order': order_index,  # 실행 순서 (Google Sheets 기록용)
         }
 
