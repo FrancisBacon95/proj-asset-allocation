@@ -25,6 +25,9 @@ from src.kis.client import KISClient
 def _make_executor(is_test: bool = False) -> OrderExecutor:
     """KISClient.__init__의 인증·토큰 흐름을 우회한 OrderExecutor 인스턴스 생성."""
     kis_client = KISClient.__new__(KISClient)  # __init__ 스킵
+    kis_client.acc_no_postfix = '01'
+    kis_client.acc_no_prefix = '00000000'
+    kis_client.mock = False
     return OrderExecutor(kis_client, account_type='ISA', is_test=is_test)
 
 

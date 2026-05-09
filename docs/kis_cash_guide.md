@@ -75,7 +75,7 @@
 
 | 필드 | 한글명 | 의미 |
 |---|---|---|
-| **`nrcvb_buy_amt`** | 미수 없는 매수 가능 금액 | **실제 매수 한도**. KIS 앱의 "주문가능"과 일치. 산식 추정: `ord_psbl_cash + ruse_psbl_amt − 수수료/세금 buffer`. ISA·퇴직연금 모두 응답. |
+| **`nrcvb_buy_amt`** | 미수 없는 매수 가능 금액 | **실제 매수 한도** (ISA 한정). KIS 앱의 "주문가능"과 일치. 산식 추정: `ord_psbl_cash + ruse_psbl_amt − 수수료/세금 buffer`. **퇴직연금 응답에는 부재 — 4.2 참조.** |
 | **`ruse_psbl_amt`** | 재사용가능금액 | 미정산 매도 대금 중 추가 매수에 즉시 활용 가능한 금액. |
 | **`ord_psbl_cash`** | 주문가능현금 | **D+0 시점 결제 완료된 현금만** (재사용가능액 제외). 이름과 달리 실제 매수 한도가 아님 — 4.1 참조. ISA·퇴직연금 모두 존재. |
 | `psbl_qty_calc_unpr` | 가능수량계산단가 | 가능 수량 산정에 쓰이는 단가 (시장가일 때 KIS 내부 추정 보수단가). |
@@ -107,7 +107,24 @@ ISA 계좌 실측 (2026-05, `test/dump_isa_orderable.py`):
 
 > **참고 (운영 무관)**: 차이 분해(예: 519,685 − 510,632 = 9,053원)는 `test/dump_isa_orderable.py`로 시점별 관측 가능. 산수상 `nrcvb ≈ ord_psbl_cash + ruse_psbl_amt − KIS 동적 마진`이지만, 이 마진의 산식·값은 알 필요가 없다.
 
-**공식 문서 부재**: `퇴직연금 매수가능조회[v1_국내주식-034]` doc은 `ord_psbl_cash` 필드명만 명시하고 정의는 없다. ISA용 inquire-psbl-order는 공식 doc 자체가 없으나 응답 구조가 퇴직연금과 동일함이 실측으로 확인됐다.
+**공식 문서 부재**: `퇴직연금 매수가능조회[v1_국내주식-034]` doc은 `ord_psbl_cash` 필드명만 명시하고 정의는 없다. ISA용 inquire-psbl-order는 공식 doc 자체가 없다. 응답 구조는 ISA·퇴직연금이 대체로 비슷하지만 `nrcvb_buy_amt` 등 일부 필드 유무에서 차이가 있으므로 주의 (4.2 참조).
+
+### 4.2 퇴직연금(PPA/IRP) 매수 한도 — `max_buy_amt` 폴백
+
+PPA·IRP의 `inquire-psbl-order` 응답에는 `nrcvb_buy_amt` 필드가 **존재하지 않는다.** 응답 키는 `ord_psbl_cash`, `ruse_psbl_amt`, `psbl_qty_calc_unpr`, `max_buy_amt`, `max_buy_qty`의 5개뿐이며, ISA에 있는 `nrcvb_buy_amt`/`nrcvb_buy_qty`/`ord_psbl_sbst`/`fund_rpch_chgs`/`cma_evlu_amt`/`ovrs_re_use_amt_wcrc`/`ord_psbl_frcr_amt_wcrc`는 부재.
+
+이는 **퇴직연금 계좌가 미수 거래를 법적으로 사용할 수 없기 때문**으로 해석된다 — "미수 없는 매수 가능 금액"이라는 개념 자체가 자명하므로 KIS가 별도 필드로 노출할 필요가 없다.
+
+따라서 본 시스템은:
+
+| 계좌 | 매수 한도 필드 | 의미 |
+|---|---|---|
+| ISA·일반(postfix='01') | `nrcvb_buy_amt` | 미수 없는 매수 가능 금액 (KIS 앱 "주문가능") |
+| 퇴직연금(postfix='22'/'29') | `max_buy_amt` | 최대 매수 금액 — 미수 불가이므로 ISA의 nrcvb와 의미적 등가 |
+
+**실측 검증**: ISA 계좌에서 `nrcvb_buy_amt == max_buy_amt`로 모든 ticker·주문구분에서 동일 값이 응답됨 (`test/dump_isa_orderable.py`). 두 필드가 같은 한도를 다른 이름으로 노출하는 형태로 추정된다.
+
+코드: `src/kis/client.py:fetch_buy_orderable_cash`가 `_is_pension()` 분기로 처리.
 
 ---
 
