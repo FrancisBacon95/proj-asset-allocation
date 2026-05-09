@@ -305,7 +305,11 @@ class KISClient():
 
         현금은 ticker='CASH', stock_nm='WON_DEPOSIT'으로 행을 추가해 통합한다.
         """
-        raw_domestic_stock = pd.DataFrame(self.fetch_domestic_stock_balance()['output1'])
+        # columns 인자로 스키마를 명시 — 보유종목이 0개일 때도 컬럼이 살아있어 다음 셀렉션이 안전하게 통과한다
+        raw_domestic_stock = pd.DataFrame(
+            self.fetch_domestic_stock_balance()['output1'],
+            columns=['pdno', 'prdt_name', 'hldg_qty', 'prpr', 'evlu_amt'],
+        )
         raw_domestic_cash = self.fetch_domestic_cash_balance()
 
         # 현금을 주식 잔고와 같은 스키마의 단일 행으로 만든다

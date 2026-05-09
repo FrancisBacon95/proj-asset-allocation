@@ -135,10 +135,40 @@ def test_today_with_sells_and_buys_uses_d2_only():
     print('✅ 오늘 매수/매도 발생 케이스: D+2 단독 반환 (이중 가산 없음)')
 
 
+def test_total_balance_with_empty_holdings():
+    """빈 계좌(보유종목 0)에서도 fetch_domestic_total_balance가 KeyError 없이 CASH 행만 반환."""
+    empty_balance_response = {
+        'output1': [],
+        'output2': [{
+            'dnca_tot_amt':       '0',
+            'nxdy_excc_amt':      '0',
+            'prvs_rcdl_excc_amt': '0',
+            'thdt_buy_amt':       '0',
+            'thdt_sll_amt':       '0',
+            'scts_evlu_amt':      '0',
+            'tot_evlu_amt':       '0',
+        }],
+        'tr_cont': 'D',
+    }
+    client = _make_client_skipping_init()
+    with patch.object(type(client), 'fetch_domestic_stock_balance',
+                      return_value={'output1': [], 'output2': []}), \
+         patch.object(type(client), '_domestic_balance_page',
+                      return_value=empty_balance_response):
+        df = client.fetch_domestic_total_balance()
+    assert (df['ticker'] == 'CASH').sum() == 1, 'CASH 행은 정확히 1개여야 함'
+    assert (df['ticker'] != 'CASH').sum() == 0, '보유종목 행은 0개여야 함'
+    cash_row = df[df['ticker'] == 'CASH'].iloc[0]
+    assert cash_row['current_value'] == 0.0, f'CASH 평가금액 0이어야 함, 실제 {cash_row["current_value"]}'
+    assert cash_row['currency_type'] == 'domestic'
+    print('✅ 빈 계좌: fetch_domestic_total_balance 안전하게 CASH 행만 반환')
+
+
 if __name__ == '__main__':
     test_fetch_domestic_cash_breakdown_returns_all_fields()
     test_fetch_domestic_cash_balance_returns_d2()
     test_fetch_buy_orderable_cash_returns_nrcvb()
     test_buy_orderable_cash_independent_of_balance()
     test_today_with_sells_and_buys_uses_d2_only()
+    test_total_balance_with_empty_holdings()
     print('\n전체 테스트 통과')
