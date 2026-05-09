@@ -1,5 +1,7 @@
 # 리팩토링 계획
 
+> 상태: 과거 리팩토링 계획 문서다. 주요 구조 분리와 BigQuery 적재는 현재 코드에 반영되었지만, 이후 IRP action plan 쓰기 기능과 운영 리스크가 추가되었다. 현재 상태와 남은 개선점은 `docs/ARCHITECTURE.md`와 `audits/`의 최신 스냅샷을 우선 참고한다.
+
 ## 배경 및 목표
 
 세 가지 문제를 해결하는 리팩토링:
@@ -29,7 +31,7 @@ docs/
 |------|-----------|
 | `src/allocation.py` | StaticAllocator만 남김, slack_notify 제거 |
 | `src/slack/client.py` | 통합 결과 포맷터 추가 |
-| `src/sheets/client.py` | `write_worksheet` 삭제, 스코프 읽기 전용, `oauth2client` → `google-auth` |
+| `src/sheets/client.py` | `write_worksheet` 삭제, `oauth2client` → `google-auth`. 현재는 IRP action plan 쓰기 때문에 쓰기 scope 유지 |
 | `main.py` | Sheets trade_log write 제거, BigQuery write + Slack 통합 호출 |
 | `pyproject.toml` | `google-cloud-bigquery` 추가, `oauth2client` 제거 |
 | `src/config/env.py` | `BQ_PROJECT_ID`, `BQ_DATASET_ID` 환경변수 추가 |
@@ -120,13 +122,10 @@ slack_client.upload_files(csv_path, msg='trade_log')          # CSV 첨부
 
 ## 4. GoogleSheetsClient 정리
 
-Sheets는 allocation 읽기 전용으로만 사용.
+원래 계획은 Sheets를 allocation 읽기 전용으로만 쓰는 것이었다. 현재 구현은 IRP 계좌에서 `{account_type}_action_plan`을 덮어쓰므로 쓰기 권한도 사용한다.
 
 1. `write_worksheet` 메서드 삭제
-2. OAuth 스코프 읽기 전용으로 축소
-   ```python
-   ['https://www.googleapis.com/auth/spreadsheets.readonly']
-   ```
+2. IRP action plan 쓰기를 위해 OAuth scope는 `https://www.googleapis.com/auth/spreadsheets` 유지
 3. `oauth2client` → `google-auth` 통일 (`google.oauth2.service_account.Credentials`)
 4. `pyproject.toml`에서 `oauth2client` 의존성 제거
 

@@ -1,7 +1,7 @@
 # proj-asset-allocation
 
 정적 자산 배분 전략을 자동으로 실행하는 리밸런싱 자동화 도구입니다.
-한국투자증권 Open API로 국내 ETF 주문을 실행하고, BigQuery에 거래 이력을 적재하며, Slack으로 리밸런싱 요약을 발송합니다.
+한국투자증권 Open API로 국내 ETF 주문을 실행하고, BigQuery에 거래 이력을 적재하며, Slack으로 리밸런싱 요약을 발송합니다. IRP 계좌는 자동 주문을 실행하지 않고 수동 주문용 action plan을 Google Sheets에 기록합니다.
 
 ![사용 흐름](./simple_use_case_diagram.jpg)
 
@@ -72,10 +72,11 @@ BQ_DATASET_ID=asset_allocation
 | 시트명 | 필수 컬럼 | 용도 |
 |---|---|---|
 | `{account_type}_allocation` | `ticker`, `weight` | 목표 자산 배분 비중 (`weight`는 0~1 소수) |
+| `{account_type}_action_plan` | 자동 생성 | IRP 계좌의 수동 주문용 플랜. IRP 실행 시 덮어씀 |
 
 `weight` 합계는 1.0 이하여야 합니다. 초과 시 실행 전 예외가 발생합니다.
 
-거래 이력은 BigQuery `trade_log` 테이블에 자동 적재됩니다. 첫 실행 시 테이블이 없으면 자동 생성됩니다. Sheets에서 거래 이력을 조회하려면 Google Sheets의 **데이터 연결 추가 → BigQuery** 기능으로 연결하세요.
+일반 계좌의 거래 이력은 BigQuery `trade_log` 테이블에 자동 적재됩니다. 첫 실행 시 테이블이 없으면 자동 생성됩니다. Sheets에서 거래 이력을 조회하려면 Google Sheets의 **데이터 연결 추가 → BigQuery** 기능으로 연결하세요.
 
 ---
 
@@ -94,8 +95,8 @@ uv run python main.py --account_type ISA
 | 플래그 | 동작 |
 |---|---|
 | `--account_type` | 실행할 계좌 타입 (필수, `kis_api_auth.json` 키와 일치) |
-| `--test` | API는 호출하지만 실제 주문 없음, BigQuery 미기록 |
-| `--force` | 7일 이내 실행 이력이 있어도 강제 실행 |
+| `--test` | KIS 조회 API는 호출하지만 실제 주문 없음, BigQuery 미기록 |
+| `--force` | 실행 조건에서 거래일/최근 실행 여부를 무시하고 주문 단계로 진행. 현재 구현은 이 플래그를 판단하기 전에 Sheets/KIS/BigQuery 초기화와 일부 조회를 수행함 |
 
 ### 실행 조건
 
@@ -104,6 +105,8 @@ uv run python main.py --account_type ISA
 1. `--test` 플래그
 2. `--force` 플래그
 3. 오늘이 거래일이고, 최근 7일 이내 동일 `account_type`으로 실행된 이력이 없음
+
+주의: 현재 구현상 `--force`는 실행 조건 가드만 우회한다. 초기화와 사전 조회 장애까지 모두 우회하지는 않는다.
 
 ---
 
@@ -124,7 +127,7 @@ src/
 │   ├── client.py        # KISClient — 한국투자증권 REST API 래퍼
 │   └── stock_config.py  # 거래소 코드 및 통화 상수
 ├── sheets/
-│   └── client.py        # GoogleSheetsClient — 목표 비중 읽기 전용 클라이언트
+│   └── client.py        # GoogleSheetsClient — 목표 비중 읽기, IRP action plan 쓰기
 └── slack/
     └── client.py        # SlackClient — 리밸런싱 요약 메시지 발송
 ```
@@ -140,3 +143,5 @@ gcloud builds submit --config cloudbuild.yaml
 ```
 
 `EXECUTE_ENV`가 `LOCAL` 이외의 값이면 GCP Application Default Credentials(ADC)를 사용하므로 서비스 계정 JSON 파일이 필요 없습니다. Cloud Run Job에서 스케줄러로 주기 실행하는 구성을 권장합니다.
+
+배포 전에는 `.dockerignore`로 `.env`, `kis_api_auth.json`, `gcp_service_account.json`, `kis_token_*` 같은 로컬 비밀 정보가 Docker 빌드 컨텍스트에 들어가지 않도록 해야 합니다.

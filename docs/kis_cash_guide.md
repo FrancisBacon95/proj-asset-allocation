@@ -31,14 +31,14 @@
 - **URL**: `/uapi/domestic-stock/v1/trading/inquire-balance`
 - **목적**: 계좌 전체 스냅샷 — 보유 종목 + 현금(예수금) + 평가금액
 - **`output2`** 에 D+0/D+1/D+2 시점별 예수금이 모두 들어 있음
-- 코드: `src/kis/client.py:185 _domestic_balance_page()`
+- 코드: `src/kis/client.py`의 `_domestic_balance_page()`
 
 ### B. 매수가능조회 (`inquire-psbl-order`)
 - **TR_ID**: `TTTC8908R`
 - **URL**: `/uapi/domestic-stock/v1/trading/inquire-psbl-order`
 - **목적**: **특정 종목**에 대한 주문 가능 금액/수량 — 종목별 증거금률, 미수 여부 등을 반영
 - 종목별로 호출해야 하므로 잔고조회보다 비용이 큼
-- 코드: `src/kis/client.py:331 fetch_domestic_enable_buy()`
+- 코드: `src/kis/client.py`의 `fetch_domestic_enable_buy()`
 
 요약하면:
 - **A는 "내 계좌에 돈이 얼마 있나"** (계좌 단위, 미래 시점 예측 포함)
@@ -180,7 +180,7 @@ available = dnca_tot_amt + thdt_sll_amt - thdt_buy_amt
 - 의미: "지금 결제 완료된 현금 + 오늘 거래 반영"
 - 장점: 가장 안전. 미수·미정산 리스크 없음.
 - 단점: T+1, T+2에 들어올 매도 대금을 활용하지 못함 → 매수 여력 과소.
-- 현재 `src/kis/client.py:151 fetch_domestic_cash_balance()`가 이 방식.
+- 현재 `fetch_domestic_cash_balance()`는 이 방식이 아니라 `prvs_rcdl_excc_amt`를 그대로 반환한다.
 
 ### 접근 B — 중도적 (KIS 매수가능조회 기반)
 ```
@@ -189,7 +189,7 @@ available = nrcvb_buy_amt + ruse_psbl_amt + thdt_sll_amt
 - 의미: KIS API가 보수적으로 답한 "주문 가능액" + 오늘 매도 대금
 - 장점: KIS 공식 가이드를 따르면서 오늘 매도분만 추가 활용
 - 단점: `nrcvb_buy_amt` 자체가 보수적이라 T+1/T+2 정산 예정분이 누락될 수 있음
-- 현재 `src/kis/client.py:350 fetch_buy_orderable_cash()`가 이 방식.
+- 현재 `fetch_buy_orderable_cash()`는 이 방식이 아니라 KIS의 `nrcvb_buy_amt`(IRP는 `max_buy_amt`)를 그대로 반환한다.
 
 ### 접근 C — 적극적 (T+2 예수금 기준)
 ```
@@ -198,7 +198,7 @@ available = prvs_rcdl_excc_amt
 - 의미: "모든 미정산 거래가 청산된 T+2 시점에 보유하게 될 예수금"
 - 장점: 이전·오늘의 매도 대금이 모두 반영 → 운용 효율 최대
 - 단점: CMA 등 즉시 주문 불가 금액이 포함될 가능성, 미수 정책 미반영 가능성
-- 현재 코드에서는 사용하지 않음.
+- 현재 `fetch_domestic_cash_balance()`와 플래너의 CASH 행은 이 기준을 사용한다.
 
 > **선택 가이드**: T+2 결제 주기 안에서 **현금을 출금하지 않고 다른 종목 매수에만 쓰는** 시나리오라면 접근 C가 가장 자연스럽다. 다만 CMA 잔액이 별도로 존재하거나 미수 위험이 있는 계좌에서는 C가 과대 추정될 수 있으므로, 실거래 1회로 `dnca_tot_amt / nrcvb_buy_amt / prvs_rcdl_excc_amt`를 모두 로깅해 비교한 뒤 도입하는 것이 안전하다.
 
@@ -208,13 +208,13 @@ available = prvs_rcdl_excc_amt
 
 | 위치 | 용도 | 사용 필드 | 비고 |
 |---|---|---|---|
-| `src/kis/client.py:151` `fetch_domestic_cash_balance()` | 플래너 입력 / 거래 전후 로깅 | `dnca_tot_amt + thdt_sll_amt - thdt_buy_amt` | 접근 A |
-| `src/kis/client.py:257` `fetch_domestic_total_balance()` | 플래너에 넘기는 잔고 DataFrame | 위 함수 결과를 CASH 행으로 추가 | 접근 A |
-| `src/kis/client.py:331` `fetch_domestic_enable_buy()` | 종목별 주문 가능 조회 | `nrcvb_buy_amt`, `ruse_psbl_amt`, `psbl_qty_calc_unpr` | inquire-psbl-order |
-| `src/kis/client.py` `fetch_buy_orderable_cash()` | 매수 시작 시 가용 현금 | inquire-psbl-order의 nrcvb_buy_amt | KIS 앱 "주문가능"과 일치 |
-| `src/executor.py:31, 43` | 거래 전후 로그 | `fetch_domestic_cash_balance()` | 접근 A |
-| `src/executor.py:49` | 매수 잔여 현금 추적 시작값 | `fetch_buy_orderable_cash()` | 접근 B |
-| `src/planner.py:79` | 총평가금액 계산 | `fetch_domestic_total_balance()` | 접근 A 기반 |
+| `src/kis/client.py` `fetch_domestic_cash_balance()` | 플래너 입력 / 거래 전후 로깅 | `prvs_rcdl_excc_amt` | 접근 C |
+| `src/kis/client.py` `fetch_domestic_total_balance()` | 플래너에 넘기는 잔고 DataFrame | 위 함수 결과를 CASH 행으로 추가 | 접근 C 기반 |
+| `src/kis/client.py` `fetch_domestic_enable_buy()` | 종목별 주문 가능 조회 | `nrcvb_buy_amt`, `max_buy_amt`, `psbl_qty_calc_unpr` | inquire-psbl-order |
+| `src/kis/client.py` `fetch_buy_orderable_cash()` | 매수 시작 시 가용 현금 | ISA/PPA는 `nrcvb_buy_amt`, IRP는 `max_buy_amt` | KIS 앱 "주문가능"과 일치시키려는 목적 |
+| `src/executor.py` | 거래 전후 로그 | `fetch_domestic_cash_balance()` | 접근 C |
+| `src/executor.py` | 매수 잔여 현금 추적 시작값 | `fetch_buy_orderable_cash()` | KIS 매수가능조회 기반 |
+| `src/planner.py` | 총평가금액 계산 | `fetch_domestic_total_balance()` | 접근 C 기반 |
 
 ---
 
@@ -224,8 +224,8 @@ available = prvs_rcdl_excc_amt
 - **`nxdy_excc_amt`, `prvs_rcdl_excc_amt`는 가산액이 아니라 잔액이다.** D+1 예수금에서 D+0 예수금을 빼면 "내일까지 들어올 순증액"을 얻을 수 있다.
 - **`thdt_sll_amt`는 T+2 미반영분이다.** `dnca_tot_amt`에 이미 포함되어 있지 않음. 단순 합산해도 이중 계산이 아니다.
 - **`nrcvb_buy_amt`는 종목 단위 보수적 추정이다.** 잔고조회의 `prvs_rcdl_excc_amt`와 일치하지 않는 것이 정상. 보통 더 작다.
-- **CMA 잔액**은 `dnca_tot_amt`에 섞여 들어올 수 있고, 즉시 주문에는 못 쓸 수 있다. 그래서 현 코드 주석(`src/kis/client.py:355`)에서 `dnca_tot_amt`를 매수 기준으로 쓰지 않는다고 명시.
-- **퇴직연금(PPA, IRP)** 은 별도 엔드포인트 (`TTTC0506R`, `TTTC2208R`, `TTTC0503R`) 를 사용하며 필드명도 일부 다르다 (예: `dnca_tota` vs `dnca_tot_amt`, `ord_psbl_cash` 별도 존재). 본 프로젝트는 현재 ISA 경로만 구현되어 있음.
+- **CMA 잔액**은 `dnca_tot_amt`에 섞여 들어올 수 있고, 즉시 주문에는 못 쓸 수 있다. 그래서 현 코드는 `dnca_tot_amt`를 매수 기준으로 쓰지 않는다.
+- **PPA(연금저축, postfix `22`)는 ISA와 동일한 일반 위탁 엔드포인트를 사용한다.** IRP(postfix `29`)만 pension 엔드포인트를 사용한다. 이 분기를 바꾸면 PPA 잔고/매수가능조회가 비정상 응답으로 돌아올 수 있다.
 
 ---
 

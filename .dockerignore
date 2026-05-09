@@ -1,0 +1,58 @@
+# ============================================================
+# Docker 빌드 컨텍스트에서 제외할 파일·디렉터리
+# ------------------------------------------------------------
+# Cloud Run 등 배포 환경에는 (a) 비밀파일은 secret manager로 주입,
+# (b) 토큰 캐시는 컨테이너 안에서 새로 발급해야 한다.
+# 빌드 컨텍스트에 포함되면 이미지 레이어에 영구히 박혀 위험.
+# ============================================================
+
+# 비밀·자격증명 (절대 이미지에 포함 금지)
+.env
+*.env
+.env.*
+gcp_service_account.json
+kis_api_auth.json
+kis_token_*
+*.pem
+*.key
+
+# 로컬 토큰·캐시
+*.dat
+.uv-cache/
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE·OS 메타
+.idea/
+.vscode/
+.DS_Store
+.git/
+.gitignore
+
+# 작업·진단 산출물 (배포 무관)
+.agent/
+audits/
+test/
+docs/
+kis_api_docs/
+*.ipynb
+.ipynb_checkpoints/
+
+# Docker 자체
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml
+
+# 기타
+README.md
+ARCHITECTURE.md
+*.md
+LICENSE

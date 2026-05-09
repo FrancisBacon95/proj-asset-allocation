@@ -1,9 +1,9 @@
 '''
 한국투자증권 REST API 클라이언트
 '''
+import os
 import requests
 import json
-import pickle
 from zoneinfo import ZoneInfo
 from datetime import date, datetime
 
@@ -74,7 +74,9 @@ class KISClient():
         self.mock = False
         self.set_base_url(self.mock)
 
-        self.token_file = PROJECT_ROOT / f'kis_token_{account_type}.dat'
+        # 토큰 캐시: pickle('.dat')에서 JSON('.json')으로 전환 (ARCH-011).
+        # 기존 .dat 파일은 자연스럽게 미사용으로 폐기 (gitignore: kis_token_* 모두 매치).
+        self.token_file = PROJECT_ROOT / f'kis_token_{account_type}.json'
         self.access_token = None
         self._exchange_rate = None  # 환율 캐시 (fetch_price 최초 호출 시 로드)
 
@@ -98,47 +100,78 @@ class KISClient():
         self.load_access_token()
 
     def check_access_token(self) -> bool:
-        """저장된 토큰이 유효한지 확인한다.
+        """저장된 토큰이 유효한지 확인한다 (JSON 캐시).
 
-        토큰 파일이 없거나, 앱키가 다르거나, 만료 시각이 지났으면 False를 반환한다.
+        다음 중 하나라도 해당되면 False (= 재발급 필요):
+        - 토큰 파일 부재
+        - JSON 파싱 실패 (예: 기존 pickle 파일·손상된 캐시)
+        - 캐시 app_key가 현재 .env의 app_key와 다름 (계좌 키 변경)
+        - 만료 시각 지남
+
+        app_secret은 캐시에 저장하지 않으며 검증에도 사용하지 않는다 (ARCH-011).
+        필요 시 self.auth_config.app_secret로 .env에서 다시 로드.
         """
         if not self.token_file.exists():
             return False
-        with self.token_file.open("rb") as f:
-            data = pickle.load(f)
-        # 발급 당시와 앱키/시크릿이 다르면 재발급 필요
-        if (data['app_key'] != self.auth_config.app_key) or (data['app_secret'] != self.auth_config.app_secret):
+        try:
+            with self.token_file.open('r', encoding='utf-8') as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            # 손상된 캐시 또는 기존 pickle 파일 — 무효 처리하여 재발급 트리거
+            logger.warning('토큰 캐시 파싱 실패. 재발급 진행: %s', self.token_file)
             return False
-        return int(datetime.now().timestamp()) < data['timestamp']
+        if data.get('app_key') != self.auth_config.app_key:
+            return False
+        expires_at = data.get('expires_at')
+        if not isinstance(expires_at, int):
+            return False
+        return int(datetime.now().timestamp()) < expires_at
 
     def issue_access_token(self) -> None:
-        """OAuth 액세스 토큰을 발급받아 파일에 저장한다."""
+        """OAuth 액세스 토큰을 발급받아 JSON 파일에 저장한다.
+
+        캐시에는 access_token, expires_at(epoch), app_key만 저장.
+        app_secret은 의도적으로 제외 (ARCH-011 — 디스크 노출 위험 제거).
+        """
         path = "oauth2/tokenP"
         url = f"{self.base_url}/{path}"
         headers = {"content-type": "application/json"}
-        data = {
+        body = {
             "grant_type": "client_credentials",
             "appkey": self.auth_config.app_key,
             "appsecret": self.auth_config.app_secret,
         }
-        resp = requests.post(url, headers=headers, json=data)
+        resp = requests.post(url, headers=headers, json=body)
         resp_data = resp.json()
         self.access_token = f'Bearer {resp_data["access_token"]}'
 
-        # 만료 시각을 타임스탬프로 변환해 함께 저장 (유효성 검사에 사용)
+        # 만료 시각을 epoch(초)로 변환해 함께 저장 (유효성 검사에 사용)
         timezone = ZoneInfo('Asia/Seoul')
-        dt = datetime.strptime(resp_data['access_token_token_expired'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone)
-        resp_data['timestamp'] = int(dt.timestamp())
-        resp_data['app_key'] = self.auth_config.app_key
-        resp_data['app_secret'] = self.auth_config.app_secret
+        expires_at = int(
+            datetime.strptime(resp_data['access_token_token_expired'], '%Y-%m-%d %H:%M:%S')
+            .replace(tzinfo=timezone).timestamp()
+        )
+        cache = {
+            'access_token': resp_data['access_token'],
+            'expires_at': expires_at,
+            'app_key': self.auth_config.app_key,
+            # app_secret은 캐시 안 함 — 필요 시 self.auth_config.app_secret로 .env에서 로드
+        }
+        self._write_token_cache(cache)
 
-        with self.token_file.open("wb") as f:
-            pickle.dump(resp_data, f)
+    def _write_token_cache(self, cache: dict) -> None:
+        """토큰 캐시를 JSON으로 기록하고 파일 권한을 0600(소유자 RW만)로 제한한다."""
+        self.token_file.write_text(json.dumps(cache, indent=2), encoding='utf-8')
+        try:
+            os.chmod(self.token_file, 0o600)
+        except OSError:
+            # Windows 등 chmod 미지원 환경에서도 동작 (권한 제한은 best-effort)
+            logger.debug('토큰 파일 권한 0600 설정 실패 (OS 미지원 가능)')
 
     def load_access_token(self) -> None:
         """파일에서 액세스 토큰을 읽어 self.access_token에 설정한다."""
-        with self.token_file.open("rb") as f:
-            data = pickle.load(f)
+        with self.token_file.open('r', encoding='utf-8') as f:
+            data = json.load(f)
         self.access_token = f'Bearer {data["access_token"]}'
 
     def issue_hashkey(self, data: dict) -> str:
