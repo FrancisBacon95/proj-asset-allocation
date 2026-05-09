@@ -1,20 +1,32 @@
+from typing import Optional
+
 import pandas as pd
 
 from src.kis.client import KISClient
 from src.logger import get_logger, log_method_call
+from src.policy import DEFAULT_EXECUTION_POLICY, ExecutionPolicy
 
 logger = get_logger(__name__)
 
-BUFFER_CASH = 10_000  # 리밸런싱 후 최소 예수금 버퍼 (원)
+# Deprecated: ExecutionPolicy.buffer_cash로 이동 (ARCH-007).
+# 외부에서 import하는 호출부 호환을 위해 모듈 상수도 유지하되 본 모듈 내부에서는 사용하지 않는다.
+BUFFER_CASH = DEFAULT_EXECUTION_POLICY.buffer_cash
 
 
 class PortfolioPlanner:
     """목표 비중과 현재 잔고를 바탕으로 리밸런싱 플랜을 계산한다."""
 
-    def __init__(self, kis_client: KISClient, allocation_info: pd.DataFrame, account_type: str) -> None:
+    def __init__(
+        self,
+        kis_client: KISClient,
+        allocation_info: pd.DataFrame,
+        account_type: str,
+        policy: Optional[ExecutionPolicy] = None,
+    ) -> None:
         self.kis_client = kis_client
         self.allocation_info = allocation_info
         self.account_type = account_type
+        self.policy = policy or DEFAULT_EXECUTION_POLICY
         self._validate_allocation(allocation_info)
 
     @staticmethod
@@ -41,10 +53,11 @@ class PortfolioPlanner:
         총 잔고 금액을 기준으로 목표 금액(target_value)을 산출하고,
         현재 금액과의 차이로 필요 거래 수량과 방향(buy/sell)을 결정한다.
         """
+        buffer_cash = self.policy.buffer_cash
         total_balance_value = balance['current_value'].sum()
-        if total_balance_value <= BUFFER_CASH:
+        if total_balance_value <= buffer_cash:
             raise ValueError(
-                f"총 평가금액({total_balance_value:,.0f}원)이 버퍼({BUFFER_CASH:,}원) 이하입니다. 리밸런싱 중단."
+                f"총 평가금액({total_balance_value:,.0f}원)이 버퍼({buffer_cash:,}원) 이하입니다. 리밸런싱 중단."
             )
         logger.info('총 평가금액 (예수금 포함): %s원', f'{total_balance_value:,.0f}')
 
@@ -56,8 +69,8 @@ class PortfolioPlanner:
         if not invalid_prices.empty:
             raise ValueError(f"유효하지 않은 가격(0 또는 NaN)이 있는 종목: {invalid_prices['ticker'].tolist()}")
 
-        # 리밸런싱 후 최소 예수금 버퍼 확보를 위해 10,000원을 차감한 금액을 기준으로 목표 금액을 계산한다.
-        result['target_value'] = result['weight'] * int(total_balance_value - BUFFER_CASH)
+        # 리밸런싱 후 최소 예수금 버퍼 확보를 위해 정책의 buffer_cash를 차감한 금액을 기준으로 목표 금액을 계산한다.
+        result['target_value'] = result['weight'] * int(total_balance_value - buffer_cash)
 
         result['required_value'] = result['target_value'] - result['current_value']
         # 수량은 절댓값으로 계산 (방향은 required_transaction으로 별도 표현)

@@ -72,25 +72,12 @@ def test_check_access_token_returns_false_for_legacy_pickle_cache():
     print('✅ check_access_token: 기존 pickle 캐시 → False (자동 마이그레이션)')
 
 
-def test_check_access_token_returns_false_when_app_key_changed():
-    """캐시 app_key가 현재 .env의 app_key와 다르면 False (계좌 키 변경 케이스)."""
-    c = _make_client_with_temp_token_file(app_key='NEW_KEY')
-    c.token_file.write_text(json.dumps({
-        'access_token': 'tok',
-        'expires_at': 9999999999,
-        'app_key': 'OLD_KEY',  # 이전 키
-    }), encoding='utf-8')
-    assert c.check_access_token() is False
-    print('✅ check_access_token: app_key 불일치 → False')
-
-
 def test_check_access_token_returns_false_when_expired():
     """만료 시각이 지나면 False."""
     c = _make_client_with_temp_token_file()
     c.token_file.write_text(json.dumps({
         'access_token': 'tok',
         'expires_at': 100,  # 1970년 epoch — 영구 만료
-        'app_key': 'TEST_APP_KEY',
     }), encoding='utf-8')
     assert c.check_access_token() is False
     print('✅ check_access_token: 만료 시각 지남 → False')
@@ -100,7 +87,7 @@ def test_check_access_token_returns_false_when_expires_at_missing_or_invalid():
     """expires_at이 None/문자열 등 비정수면 False (잘못된 캐시 구조)."""
     c = _make_client_with_temp_token_file()
     for bad in [None, 'not_a_number', '1234567890']:
-        cache = {'access_token': 'tok', 'app_key': 'TEST_APP_KEY'}
+        cache = {'access_token': 'tok'}
         if bad is not None:
             cache['expires_at'] = bad
         c.token_file.write_text(json.dumps(cache), encoding='utf-8')
@@ -109,24 +96,27 @@ def test_check_access_token_returns_false_when_expires_at_missing_or_invalid():
 
 
 def test_check_access_token_returns_true_when_valid():
-    """모든 조건 만족 시 True."""
+    """access_token + 유효한 expires_at만 있으면 True (app_key/app_secret 검증 안 함)."""
     c = _make_client_with_temp_token_file()
     c.token_file.write_text(json.dumps({
         'access_token': 'valid_token',
         'expires_at': 9999999999,  # 2286년까지 유효
-        'app_key': 'TEST_APP_KEY',
+        # app_key/app_secret 모두 캐시에 없음 (ARCH-011)
     }), encoding='utf-8')
     assert c.check_access_token() is True
-    print('✅ check_access_token: 모든 조건 만족 → True')
+    print('✅ check_access_token: 모든 조건 만족 (app_key 부재여도 OK) → True')
 
 
 # ---------------------------------------------------------------------------- #
 # issue_access_token — JSON 저장 + app_secret 제외                              #
 # ---------------------------------------------------------------------------- #
 
-def test_issue_access_token_writes_json_without_app_secret():
-    """발급 후 토큰 캐시는 JSON이고 access_token/expires_at/app_key만 포함, app_secret 부재."""
-    c = _make_client_with_temp_token_file(app_secret='TOP_SECRET_VALUE')
+def test_issue_access_token_writes_json_without_app_key_or_secret():
+    """발급 후 토큰 캐시는 JSON이고 access_token + expires_at만 포함.
+
+    ARCH-011: app_key/app_secret 모두 캐시에서 제외 (디스크 노출 최소화).
+    """
+    c = _make_client_with_temp_token_file(app_key='TEST_APP_KEY', app_secret='TOP_SECRET_VALUE')
     c.base_url = 'https://example.com'
 
     fake_resp = MagicMock()
@@ -142,18 +132,21 @@ def test_issue_access_token_writes_json_without_app_secret():
     raw = c.token_file.read_text(encoding='utf-8')
     parsed = json.loads(raw)  # JSON 파싱 가능 검증
 
-    # 필수 키 존재
+    # 필수 키만 존재 (정확히 2개)
     assert parsed['access_token'] == 'NEW_TOKEN'
-    assert parsed['app_key'] == 'TEST_APP_KEY'
     assert isinstance(parsed['expires_at'], int)
+    assert set(parsed.keys()) == {'access_token', 'expires_at'}, \
+        f'캐시 키는 access_token + expires_at만 허용, 실제 {set(parsed.keys())}'
 
-    # ★ app_secret은 절대 캐시에 저장 안 됨
+    # ★ app_key/app_secret 모두 캐시 부재 + 값이 파일에 노출 안 됨
+    assert 'app_key' not in parsed, 'app_key가 캐시에 저장됨 (ARCH-011 위반)'
     assert 'app_secret' not in parsed, 'app_secret이 캐시에 저장됨 (ARCH-011 위반)'
-    assert 'TOP_SECRET_VALUE' not in raw, 'app_secret 값이 파일 어디에도 노출되면 안 됨'
+    assert 'TEST_APP_KEY' not in raw, 'app_key 값이 파일에 노출되면 안 됨'
+    assert 'TOP_SECRET_VALUE' not in raw, 'app_secret 값이 파일에 노출되면 안 됨'
 
     # access_token 인스턴스 변수에도 설정됨
     assert c.access_token == 'Bearer NEW_TOKEN'
-    print('✅ issue_access_token: JSON 저장 + app_secret 부재 (ARCH-011)')
+    print('✅ issue_access_token: JSON 저장 + app_key/app_secret 모두 부재 (ARCH-011)')
 
 
 def test_issue_access_token_chmod_token_file_to_0600():
@@ -214,6 +207,7 @@ def test_initialize_recovers_from_corrupted_cache():
     assert c.access_token == 'Bearer RECOVERED_TOKEN', '손상 캐시 → 재발급 → load 흐름 통과'
     parsed = json.loads(c.token_file.read_text(encoding='utf-8'))
     assert parsed['access_token'] == 'RECOVERED_TOKEN'
+    assert 'app_key' not in parsed
     assert 'app_secret' not in parsed
     print('✅ initialize_access_token: 손상 캐시 → 자동 재발급 → 정상 로드')
 
@@ -222,11 +216,10 @@ if __name__ == '__main__':
     test_check_access_token_returns_false_when_file_missing()
     test_check_access_token_returns_false_for_corrupted_json()
     test_check_access_token_returns_false_for_legacy_pickle_cache()
-    test_check_access_token_returns_false_when_app_key_changed()
     test_check_access_token_returns_false_when_expired()
     test_check_access_token_returns_false_when_expires_at_missing_or_invalid()
     test_check_access_token_returns_true_when_valid()
-    test_issue_access_token_writes_json_without_app_secret()
+    test_issue_access_token_writes_json_without_app_key_or_secret()
     test_issue_access_token_chmod_token_file_to_0600()
     test_load_access_token_reads_json()
     test_initialize_recovers_from_corrupted_cache()

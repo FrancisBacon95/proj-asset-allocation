@@ -1,9 +1,12 @@
+from typing import Optional
+
 import pandas as pd
 
 from src.kis.client import KISClient
 from src.logger import get_logger, log_method_call
 from src.planner import PortfolioPlanner
 from src.executor import OrderExecutor
+from src.policy import DEFAULT_EXECUTION_POLICY, ExecutionPolicy
 
 logger = get_logger(__name__)
 
@@ -13,15 +16,35 @@ class StaticAllocator:
 
     allocation_info(종목별 목표 비중)와 현재 잔고를 비교해
     매수/매도 수량을 계산하고 주문을 실행한다.
+
+    ExecutionPolicy(ARCH-007)는 미주입 시 DEFAULT_EXECUTION_POLICY 사용.
+    Planner와 Executor에 동일한 정책 인스턴스를 주입한다.
     """
     @log_method_call
-    def __init__(self, account_type: str, allocation_info: pd.DataFrame, is_test: bool = False) -> None:
+    def __init__(
+        self,
+        account_type: str,
+        allocation_info: pd.DataFrame,
+        is_test: bool = False,
+        policy: Optional[ExecutionPolicy] = None,
+    ) -> None:
         self.account_type = account_type
         self.allocation_info = allocation_info
         self.is_test = is_test
+        self.policy = policy or DEFAULT_EXECUTION_POLICY
+        logger.info(
+            'ExecutionPolicy: buffer_cash=%s, sell_to_buy_wait=%ss, buy_cash_safety_ratio=%s',
+            f'{self.policy.buffer_cash:,}',
+            self.policy.sell_to_buy_wait_seconds,
+            self.policy.buy_cash_safety_ratio,
+        )
         kis_client = KISClient(account_type)
-        self.planner = PortfolioPlanner(kis_client, allocation_info, account_type)
-        self.executor = OrderExecutor(kis_client, account_type, is_test)
+        self.planner = PortfolioPlanner(
+            kis_client, allocation_info, account_type, policy=self.policy,
+        )
+        self.executor = OrderExecutor(
+            kis_client, account_type, is_test, policy=self.policy,
+        )
 
     def is_trading_day(self, date) -> bool:
         return self.planner.kis_client.is_trading_day(date)

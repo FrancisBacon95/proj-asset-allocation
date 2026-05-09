@@ -375,7 +375,8 @@ def test_domestic_balance_page_pension_request_params():
     """
     # IRP postfix='29' 케이스
     client = _make_client_skipping_init(acc_no_postfix='29')
-    mock_resp = _make_mock_response({'output1': [], 'output2': {}})
+    # ARCH-005: _check_rt_cd가 rt_cd='0' 검증하므로 mock에도 포함
+    mock_resp = _make_mock_response({'output1': [], 'output2': {}, 'rt_cd': '0', 'msg1': 'OK'})
 
     with patch.object(type(client), '_get', return_value=mock_resp) as mock_get:
         client._domestic_balance_page()
@@ -415,7 +416,8 @@ def test_fetch_domestic_enable_buy_irp_request_params():
     """
     # IRP 케이스
     client = _make_client_skipping_init(acc_no_postfix='29')
-    mock_resp = _make_mock_response({'output': {'max_buy_amt': '0'}})
+    # ARCH-005: _check_rt_cd가 rt_cd='0' 검증하므로 mock에도 포함
+    mock_resp = _make_mock_response({'output': {'max_buy_amt': '0'}, 'rt_cd': '0', 'msg1': 'OK'})
 
     with patch.object(type(client), '_get', return_value=mock_resp) as mock_get:
         client.fetch_domestic_enable_buy(ticker='005930', ord_dvsn='01', price=-1)

@@ -1,4 +1,5 @@
 import argparse
+import uuid
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
@@ -38,20 +39,37 @@ def main() -> None:
     allocator = StaticAllocator(account_type=args.account_type, allocation_info=allocation_info, is_test=args.test)
     is_irp = allocator.planner.kis_client.is_irp()
 
-    is_market_open = allocator.is_trading_day(kst_date)
-    # IRP는 BigQuery에 거래 이력을 적재하지 않아 is_already_executed가 항상 False를
-    # 반환한다. 무한 재실행을 막는 진짜 빈도 제어는 외부 cron(예: Cloud Run 매달 1일)에 맡긴다.
-    if args.test or is_irp:
+    # ARCH-002: 실행 모드 결정을 외부 조회 앞으로 이동.
+    # --force 시에는 is_market_open / is_already_executed 외부 호출 자체를 건너뛴다.
+    # is_already_executed는 IRP일 때도 의미 없어 스킵 (BQ 거래 이력 부재 — cron으로 빈도 제어).
+    if args.force:
+        is_market_open = True
         already_executed = False
-        if is_irp:
-            logger.info('IRP 계좌: is_already_executed 체크 스킵 (BQ 거래 이력 부재). cron으로 빈도 제어.')
+        logger.info('--force 모드: 외부 조건(is_market_open/is_already_executed) 무시하고 실행')
+    elif args.test:
+        is_market_open = allocator.is_trading_day(kst_date)
+        already_executed = False
     else:
-        already_executed = bq_client.is_already_executed(args.account_type, kst_date)
+        is_market_open = allocator.is_trading_day(kst_date)
+        if is_irp:
+            already_executed = False
+            logger.info('IRP 계좌: is_already_executed 체크 스킵 (BQ 거래 이력 부재). cron으로 빈도 제어.')
+        else:
+            already_executed = bq_client.is_already_executed(args.account_type, kst_date)
 
     logger.info('is_market_open: %s', is_market_open)
     logger.info('is_already_executed: %s', already_executed)
 
     if args.test or args.force or (is_market_open and not already_executed):
+        # ARCH-003: 실행 단위 식별자(run_id)를 발급해 BQ에 marker + trade_log 모두 동일 그룹으로 묶는다.
+        run_id = uuid.uuid4().hex
+        logger.info('run_id 발급: %s (account_type=%s)', run_id, args.account_type)
+
+        # 주문 시작 sentinel: BQ에 'started' marker 적재 → 이후 크래시해도 다음 실행이 이 marker로 중복 인지.
+        # IRP·is_test는 BQ 적재 없으므로 marker도 스킵.
+        if bq_client is not None and not is_irp:
+            bq_client.append_run_marker(run_id, args.account_type, status='started')
+
         result, remaining_cash = allocator.run()
 
         if is_irp:
@@ -80,7 +98,9 @@ def main() -> None:
             slack_notify(f'[{args.account_type}] 리밸런싱 완료', summary)
 
             if bq_client is not None:
-                bq_client.append_trade_log(result, account_type=args.account_type)
+                bq_client.append_trade_log(result, account_type=args.account_type, run_id=run_id)
+                # 완료 sentinel — 감사 흔적용 (started/completed 페어로 run 추적 가능)
+                bq_client.append_run_marker(run_id, args.account_type, status='completed')
 
 
 if __name__ == '__main__':

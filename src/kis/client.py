@@ -4,6 +4,7 @@
 import os
 import requests
 import json
+from typing import Optional
 from zoneinfo import ZoneInfo
 from datetime import date, datetime
 
@@ -16,6 +17,52 @@ logger = get_logger(__name__)
 # nrcvb_buy_amt 조회용 더미 ticker. inquire-psbl-order는 ticker 인자가 필수이지만
 # nrcvb_buy_amt 자체는 종목 무관 계좌 단위 상수임이 실험으로 확정됨 (test/dump_isa_orderable.py).
 DUMMY_TICKER_FOR_ORDERABLE_CASH = '005930'  # 삼성전자, 상장폐지 위험 사실상 없음
+
+
+# === KIS HTTP 견고성 (ARCH-005) =========================================== #
+# 모든 KIS API 호출은 본 모듈의 _request/_parse_json/_check_rt_cd 경로를
+# 통과해야 한다. 무한 hang 방지(timeout), HTTP 비정상 가시화(raise_for_status),
+# 응답 형식 가드(JSON 파싱), 비즈니스 코드 검증(rt_cd) 네 단계를 일관되게 적용.
+
+DEFAULT_REQUEST_TIMEOUT = 10  # seconds. 외부 API 응답 대기 상한.
+
+
+class KISAPIError(RuntimeError):
+    """KIS API 호출 실패 도메인 예외.
+
+    네트워크 오류·HTTP 비정상·JSON 파싱 실패·KIS rt_cd 비정상 모두 본 예외로 통일한다.
+    민감 정보(헤더·앱 키 등)는 노출하지 않고, 운영 진단에 필요한 endpoint/tr_id/
+    HTTP status/rt_cd/msg1만 attribute로 보존한다.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        path: Optional[str] = None,
+        tr_id: Optional[str] = None,
+        status_code: Optional[int] = None,
+        kis_rt_cd: Optional[str] = None,
+        kis_msg: Optional[str] = None,
+    ) -> None:
+        self.path = path
+        self.tr_id = tr_id
+        self.status_code = status_code
+        self.kis_rt_cd = kis_rt_cd
+        self.kis_msg = kis_msg
+        ctx_parts = []
+        if path:
+            ctx_parts.append(f"path={path}")
+        if tr_id:
+            ctx_parts.append(f"tr_id={tr_id}")
+        if status_code is not None:
+            ctx_parts.append(f"http={status_code}")
+        if kis_rt_cd is not None:
+            ctx_parts.append(f"rt_cd={kis_rt_cd}")
+        if kis_msg:
+            ctx_parts.append(f"msg={kis_msg}")
+        ctx = f" [{', '.join(ctx_parts)}]" if ctx_parts else ""
+        super().__init__(f"{message}{ctx}")
 
 
 # === KIS 응답 안전 추출 유틸 =============================================== #
@@ -105,11 +152,11 @@ class KISClient():
         다음 중 하나라도 해당되면 False (= 재발급 필요):
         - 토큰 파일 부재
         - JSON 파싱 실패 (예: 기존 pickle 파일·손상된 캐시)
-        - 캐시 app_key가 현재 .env의 app_key와 다름 (계좌 키 변경)
-        - 만료 시각 지남
+        - 만료 시각 지남 또는 expires_at 형식 비정상
 
-        app_secret은 캐시에 저장하지 않으며 검증에도 사용하지 않는다 (ARCH-011).
-        필요 시 self.auth_config.app_secret로 .env에서 다시 로드.
+        ARCH-011: 캐시에는 access_token + expires_at만 저장.
+        app_key/app_secret 모두 캐시·검증에 사용하지 않는다 (디스크 노출 최소화).
+        필요 시 .env에서 self.auth_config로 매번 다시 로드.
         """
         if not self.token_file.exists():
             return False
@@ -120,8 +167,6 @@ class KISClient():
             # 손상된 캐시 또는 기존 pickle 파일 — 무효 처리하여 재발급 트리거
             logger.warning('토큰 캐시 파싱 실패. 재발급 진행: %s', self.token_file)
             return False
-        if data.get('app_key') != self.auth_config.app_key:
-            return False
         expires_at = data.get('expires_at')
         if not isinstance(expires_at, int):
             return False
@@ -130,8 +175,8 @@ class KISClient():
     def issue_access_token(self) -> None:
         """OAuth 액세스 토큰을 발급받아 JSON 파일에 저장한다.
 
-        캐시에는 access_token, expires_at(epoch), app_key만 저장.
-        app_secret은 의도적으로 제외 (ARCH-011 — 디스크 노출 위험 제거).
+        ARCH-011: 캐시에는 access_token + expires_at(epoch)만 저장.
+        app_key/app_secret 모두 의도적으로 제외 (디스크 노출 최소화).
         """
         path = "oauth2/tokenP"
         url = f"{self.base_url}/{path}"
@@ -141,11 +186,27 @@ class KISClient():
             "appkey": self.auth_config.app_key,
             "appsecret": self.auth_config.app_secret,
         }
-        resp = requests.post(url, headers=headers, json=body)
-        resp_data = resp.json()
+        try:
+            resp = requests.post(url, headers=headers, json=body, timeout=DEFAULT_REQUEST_TIMEOUT)
+        except requests.RequestException as e:
+            raise KISAPIError(
+                f"KIS 토큰 발급 요청 실패: {type(e).__name__}", path=path,
+            ) from e
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError as e:
+            raise KISAPIError(
+                "KIS 토큰 발급 HTTP 비정상 응답", path=path, status_code=resp.status_code,
+            ) from e
+        resp_data = self._parse_json(resp, path=path)
+        if 'access_token' not in resp_data:
+            raise KISAPIError(
+                "KIS 토큰 발급 응답에 access_token 부재", path=path,
+                status_code=resp.status_code,
+            )
         self.access_token = f'Bearer {resp_data["access_token"]}'
 
-        # 만료 시각을 epoch(초)로 변환해 함께 저장 (유효성 검사에 사용)
+        # 만료 시각을 epoch(초)로 변환해 저장 (유효성 검사에 사용)
         timezone = ZoneInfo('Asia/Seoul')
         expires_at = int(
             datetime.strptime(resp_data['access_token_token_expired'], '%Y-%m-%d %H:%M:%S')
@@ -154,8 +215,7 @@ class KISClient():
         cache = {
             'access_token': resp_data['access_token'],
             'expires_at': expires_at,
-            'app_key': self.auth_config.app_key,
-            # app_secret은 캐시 안 함 — 필요 시 self.auth_config.app_secret로 .env에서 로드
+            # app_key/app_secret 모두 캐시 안 함 — 필요 시 .env에서 self.auth_config로 다시 로드
         }
         self._write_token_cache(cache)
 
@@ -188,8 +248,27 @@ class KISClient():
             "appSecret": self.auth_config.app_secret,
             "User-Agent": "Mozilla/5.0"
         }
-        resp = requests.post(url, headers=headers, data=json.dumps(data))
-        return resp.json()["HASH"]
+        try:
+            resp = requests.post(
+                url, headers=headers, data=json.dumps(data),
+                timeout=DEFAULT_REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as e:
+            raise KISAPIError(
+                f"KIS 해시키 발급 요청 실패: {type(e).__name__}", path=path,
+            ) from e
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError as e:
+            raise KISAPIError(
+                "KIS 해시키 발급 HTTP 비정상 응답", path=path, status_code=resp.status_code,
+            ) from e
+        payload = self._parse_json(resp, path=path)
+        if 'HASH' not in payload:
+            raise KISAPIError(
+                "KIS 해시키 응답에 HASH 부재", path=path, status_code=resp.status_code,
+            )
+        return payload["HASH"]
 
     def _headers(self, tr_id: str, **extra) -> dict:
         """공통 요청 헤더를 생성한다. 추가 헤더는 **extra로 전달한다."""
@@ -202,21 +281,119 @@ class KISClient():
             **extra,
         }
 
+    # ------------------------------------------------------------------ #
+    # HTTP 헬퍼 (ARCH-005)                                                  #
+    # ------------------------------------------------------------------ #
+    # 외부 호출은 모두 _get/_post를 통과한다.
+    # - timeout: DEFAULT_REQUEST_TIMEOUT 강제 → 무한 hang 방지
+    # - raise_for_status: 4xx/5xx를 HTTPError로 가시화
+    # - RequestException(타임아웃·DNS·연결 거부 등): KISAPIError로 감쌈
+    # 응답 본문 파싱·rt_cd 검증은 _get_json/_post_json 또는 호출부에서 수행.
+
     def _get(self, path: str, tr_id: str, params: dict, **extra) -> requests.Response:
-        """공통 GET 요청 헬퍼."""
-        return requests.get(
-            f"{self.base_url}/{path}",
-            headers=self._headers(tr_id, **extra),
-            params=params,
-        )
+        """공통 GET 요청 헬퍼. timeout + raise_for_status 적용, 실패 시 KISAPIError."""
+        url = f"{self.base_url}/{path}"
+        try:
+            resp = requests.get(
+                url,
+                headers=self._headers(tr_id, **extra),
+                params=params,
+                timeout=DEFAULT_REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as e:
+            raise KISAPIError(
+                f"KIS GET 요청 실패: {type(e).__name__}", path=path, tr_id=tr_id,
+            ) from e
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError as e:
+            raise KISAPIError(
+                "KIS HTTP 비정상 응답", path=path, tr_id=tr_id, status_code=resp.status_code,
+            ) from e
+        return resp
 
     def _post(self, path: str, tr_id: str, data: dict, **extra) -> requests.Response:
-        """공통 POST 요청 헬퍼."""
-        return requests.post(
-            f"{self.base_url}/{path}",
-            headers=self._headers(tr_id, **extra),
-            data=json.dumps(data),
-        )
+        """공통 POST 요청 헬퍼. timeout + raise_for_status 적용, 실패 시 KISAPIError."""
+        url = f"{self.base_url}/{path}"
+        try:
+            resp = requests.post(
+                url,
+                headers=self._headers(tr_id, **extra),
+                data=json.dumps(data),
+                timeout=DEFAULT_REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as e:
+            raise KISAPIError(
+                f"KIS POST 요청 실패: {type(e).__name__}", path=path, tr_id=tr_id,
+            ) from e
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError as e:
+            raise KISAPIError(
+                "KIS HTTP 비정상 응답", path=path, tr_id=tr_id, status_code=resp.status_code,
+            ) from e
+        return resp
+
+    @staticmethod
+    def _parse_json(resp: requests.Response, *, path: str, tr_id: Optional[str] = None) -> dict:
+        """응답 JSON 파싱. 형식 비정상 시 KISAPIError로 변환."""
+        try:
+            return resp.json()
+        except (json.JSONDecodeError, ValueError) as e:
+            raise KISAPIError(
+                "KIS 응답 JSON 파싱 실패", path=path, tr_id=tr_id,
+                status_code=resp.status_code,
+            ) from e
+
+    @staticmethod
+    def _check_rt_cd(payload: dict, *, path: str, tr_id: Optional[str] = None) -> None:
+        """KIS 응답 rt_cd '0' 검증. 비정상이면 KISAPIError.
+
+        rt_cd가 부재하는 응답(oauth2/tokenP, hashkey 등)에는 호출하지 않는다.
+        """
+        rt_cd = payload.get('rt_cd')
+        if rt_cd != '0':
+            raise KISAPIError(
+                "KIS 응답 비정상 (rt_cd != 0)",
+                path=path, tr_id=tr_id,
+                kis_rt_cd=str(rt_cd) if rt_cd is not None else None,
+                kis_msg=payload.get('msg1'),
+            )
+
+    def _get_json(
+        self,
+        path: str,
+        tr_id: str,
+        params: dict,
+        *,
+        validate_rt_cd: bool = True,
+        **extra,
+    ) -> dict:
+        """GET → JSON 파싱 → (옵션) rt_cd 검증까지 일괄 처리한 편의 메서드.
+
+        헤더(tr_cont 페이지네이션 등)가 필요한 호출은 _get을 직접 사용.
+        """
+        resp = self._get(path, tr_id, params, **extra)
+        payload = self._parse_json(resp, path=path, tr_id=tr_id)
+        if validate_rt_cd:
+            self._check_rt_cd(payload, path=path, tr_id=tr_id)
+        return payload
+
+    def _post_json(
+        self,
+        path: str,
+        tr_id: str,
+        data: dict,
+        *,
+        validate_rt_cd: bool = True,
+        **extra,
+    ) -> dict:
+        """POST → JSON 파싱 → (옵션) rt_cd 검증까지 일괄 처리한 편의 메서드."""
+        resp = self._post(path, tr_id, data, **extra)
+        payload = self._parse_json(resp, path=path, tr_id=tr_id)
+        if validate_rt_cd:
+            self._check_rt_cd(payload, path=path, tr_id=tr_id)
+        return payload
 
     # ------------------------------------------------------------------ #
     # 계좌 유형 분기 헬퍼 (ISA·연금저축 vs IRP)                                   #
@@ -394,8 +571,11 @@ class KISClient():
                 'CTX_AREA_FK100': ctx_area_fk100,
                 'CTX_AREA_NK100': ctx_area_nk100,
             }
-        res = self._get(self._balance_url(), self._balance_tr_id(), params)
-        data = res.json()
+        path = self._balance_url()
+        tr_id = self._balance_tr_id()
+        res = self._get(path, tr_id, params)
+        data = self._parse_json(res, path=path, tr_id=tr_id)
+        self._check_rt_cd(data, path=path, tr_id=tr_id)
         # 다음 페이지 존재 여부는 응답 body가 아닌 응답 헤더의 tr_cont로 판단한다
         data['tr_cont'] = res.headers['tr_cont']
         return data
@@ -426,8 +606,10 @@ class KISClient():
             'CTX_AREA_FK200': ctx_area_fk200,
             'CTX_AREA_NK200': ctx_area_nk200
         }
-        res = self._get("uapi/overseas-stock/v1/trading/inquire-balance", tr_id, params)
-        data = res.json()
+        path = "uapi/overseas-stock/v1/trading/inquire-balance"
+        res = self._get(path, tr_id, params)
+        data = self._parse_json(res, path=path, tr_id=tr_id)
+        self._check_rt_cd(data, path=path, tr_id=tr_id)
         data['tr_cont'] = res.headers['tr_cont']
         return data
 
@@ -447,7 +629,9 @@ class KISClient():
             "TR_MKET_CD": "00",
             "INQR_DVSN_CD": "00"
         }
-        return self._get("uapi/overseas-stock/v1/trading/inquire-present-balance", tr_id, params).json()
+        return self._get_json(
+            "uapi/overseas-stock/v1/trading/inquire-present-balance", tr_id, params,
+        )
 
     @log_method_call
     def fetch_domestic_total_balance(self) -> pd.DataFrame:
@@ -557,7 +741,7 @@ class KISClient():
             params['ACCA_DVSN_CD'] = '00'   # IRP 적립금구분(전체)
         else:
             params['OVRS_ICLD_YN'] = 'N'    # ISA·연금저축 전용 (IRP doc에 없음)
-        return self._get(self._orderable_url(), self._orderable_tr_id(), params).json()['output']
+        return self._get_json(self._orderable_url(), self._orderable_tr_id(), params)['output']
 
     @log_method_call
     def fetch_buy_orderable_cash(self) -> int:
@@ -592,7 +776,9 @@ class KISClient():
             'ACNT_PRDT_CD': self.acc_no_postfix,
             'PDNO': ticker,
         }
-        return self._get("uapi/domestic-stock/v1/trading/inquire-psbl-sell", "TTTC8408R", params).json()['output']
+        return self._get_json(
+            "uapi/domestic-stock/v1/trading/inquire-psbl-sell", "TTTC8408R", params,
+        )['output']
 
     @log_method_call
     def fetch_domestic_price(self, market_code: str, symbol: str) -> dict:
@@ -606,7 +792,9 @@ class KISClient():
             "fid_cond_mrkt_div_code": market_code,
             "fid_input_iscd": symbol
         }
-        return self._get("uapi/domestic-stock/v1/quotations/inquire-price", "FHKST01010100", params).json()
+        return self._get_json(
+            "uapi/domestic-stock/v1/quotations/inquire-price", "FHKST01010100", params,
+        )
 
     @log_method_call
     def fetch_oversea_price(self, symbol: str, exchange_code: str = "NAS") -> dict:
@@ -620,7 +808,9 @@ class KISClient():
             "EXCD": exchange_code,
             "SYMB": symbol
         }
-        return self._get("uapi/overseas-price/v1/quotations/price", "HHDFS00000300", params).json()
+        return self._get_json(
+            "uapi/overseas-price/v1/quotations/price", "HHDFS00000300", params,
+        )
 
     @property
     def exchange_rate(self) -> float:
@@ -659,7 +849,10 @@ class KISClient():
             "CTX_AREA_NK": "",
             "CTX_AREA_FK": ""
         }
-        return self._get("uapi/domestic-stock/v1/quotations/chk-holiday", "CTCA0903R", params, custtype="P").json()['output']
+        return self._get_json(
+            "uapi/domestic-stock/v1/quotations/chk-holiday", "CTCA0903R", params,
+            custtype="P",
+        )['output']
 
     def is_trading_day(self, target_date: date) -> bool:
         """해당 날짜가 개장일이면서 결제일인지 확인한다 (주문 실행 가능 여부 판단용)."""
@@ -706,4 +899,9 @@ class KISClient():
             data["ACCA_DVSN_CD"] = "00"
         # 주문 API는 request body 위변조 방지를 위해 해시키 서명이 필수
         hashkey = self.issue_hashkey(data)
-        return self._post("uapi/domestic-stock/v1/trading/order-cash", tr_id, data, custtype="P", hashkey=hashkey).json()
+        # rt_cd != '0'이어도 raise하지 않는다 — executor가 is_success=False로 기록해야
+        # 부분 실패가 영속 저장소·Slack에 가시화된다 (ARCH-008과 일관).
+        return self._post_json(
+            "uapi/domestic-stock/v1/trading/order-cash", tr_id, data,
+            validate_rt_cd=False, custtype="P", hashkey=hashkey,
+        )

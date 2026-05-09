@@ -57,15 +57,22 @@ def _format_stock_header(row) -> str:
 
 
 def _format_result_for_slack(df: pd.DataFrame) -> str:
-    """리밸런싱 실행 결과 DataFrame을 Slack 메시지 형식의 문자열로 변환한다."""
+    """리밸런싱 실행 결과 DataFrame을 Slack 메시지 형식의 문자열로 변환한다.
+
+    ARCH-004 이후 requested_quantity / filled_quantity 둘 다 노출.
+    transaction_quantity는 deprecated alias이므로 표시에서 제외.
+    """
     lines = []
     for _, row in df.iterrows():
+        # ARCH-004 컬럼 부재 시 transaction_quantity로 폴백 (legacy DataFrame 호환)
+        requested = row.get('requested_quantity', row.get('transaction_quantity'))
+        filled = row.get('filled_quantity', row.get('transaction_quantity'))
         lines.append(
             _format_stock_header(row) + "\n"
             f"- required_transaction: `{row['required_transaction']}`\n"
             f"- required_quantity: `{row['required_quantity']}`\n"
             f"- enable_quantity: `{row['enable_quantity']}`\n"
-            f"- transaction_quantity: `{row['transaction_quantity']}`\n"
+            f"- requested / filled: `{requested}` / `{filled}`\n"
             f"- skipped_reason: `{row.get('skipped_reason')}`\n"
             f"- is_success: `{row['is_success']}`\n"
             f"- response_msg: `{row['response_msg']}`"
@@ -80,47 +87,61 @@ def format_rebalancing_summary(
     dt,
     trade_log_url: str = None,
 ) -> str:
-    """리밸런싱 결과를 Slack mrkdwn 형식의 표로 포맷팅."""
+    """리밸런싱 결과를 Slack mrkdwn 형식의 표로 포맷팅 (ARCH-006).
+
+    설계:
+    - 전·후 분모를 분리: 전 = (전 주식 평가금 + 전 예수금), 후 = (후 주식 평가금 + 잔여 예수금).
+      현금을 분모 구성 요소로 명시 포함해 buy-only / sell-only 시나리오에서도 일관.
+    - 후 비중은 주문 요청 수량이 아니라 확인된 체결 수량(filled_quantity) 기준.
+      ARCH-004 이전 호출자 호환을 위해 filled_quantity 부재 시 transaction_quantity로 폴백.
+    - planner가 계산한 원래 current_pct는 덮어쓰지 않고 보존. 표시는 별도 _before_pct 컬럼.
+      (planner의 current_pct는 buffer 미차감 총자산 기준 — 동일 분모이므로 본 함수의 _before_pct와 일치.)
+    """
     # dt가 date/datetime 모두 허용
     if hasattr(dt, 'strftime'):
         dt_str = dt.strftime('%Y-%m-%d %H:%M KST') if hasattr(dt, 'hour') else dt.strftime('%Y-%m-%d') + ' KST'
     else:
         dt_str = str(dt)
 
+    # 전 예수금: planner가 만든 CASH 행의 current_value (체결 전 기준).
+    # 부재 시 0으로 폴백 — 현금 미보유 케이스 또는 비표준 결과셋 대비.
+    cash_row = result_df[result_df['ticker'] == 'CASH']
+    cash_before = float(cash_row['current_value'].iloc[0]) if not cash_row.empty else 0.0
+
     df = result_df[result_df['ticker'] != 'CASH'].copy()
 
-    # direction 계산: required_transaction 컬럼 기준
-    def _direction(val):
-        if pd.isna(val) or val is None:
-            return 0
-        v = str(val).strip().lower()
-        if v == 'buy':
-            return 1
-        if v == 'sell':
-            return -1
-        return 0
+    # 체결 수량 — ARCH-004 분리 이후 filled_quantity 사용. 부재(legacy/외부 호출) 시 transaction_quantity 폴백.
+    if 'filled_quantity' not in df.columns:
+        df['filled_quantity'] = df.get('transaction_quantity', 0)
 
-    # 숫자 변환을 방향 계산 전에 통일
-    for col in ('transaction_quantity', 'current_value', 'current_price', 'weight', 'current_pct'):
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    # 숫자 변환 통일
+    for col in ('filled_quantity', 'current_value', 'current_price', 'weight', 'current_pct'):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-    # is_success=True인 경우만 실제 체결로 인정
-    df['_direction'] = df.apply(
-        lambda r: _direction(r['required_transaction']) if r.get('is_success') is True else 0,
-        axis=1,
-    )
+    # 방향: buy=+1, sell=-1, 그 외 0. filled_quantity가 0이면 _after_value에 영향 없으므로 안전.
+    direction_map = {'buy': 1, 'sell': -1}
+    df['_direction'] = df['required_transaction'].map(direction_map).fillna(0)
 
-    df['_after_value'] = df['current_value'] + df['_direction'] * df['transaction_quantity'] * df['current_price']
+    # 후 평가금액 = 전 평가금액 + 방향 × 체결수량(filled) × 현재가
+    df['_after_value'] = df['current_value'] + df['_direction'] * df['filled_quantity'] * df['current_price']
 
-    # 리밸런싱은 총 자산 규모를 바꾸지 않으므로 분모를 고정값으로 사용
-    total_portfolio = df['current_value'].sum() + remaining_cash
-    df['_after_pct'] = df['_after_value'] / total_portfolio * 100 if total_portfolio > 0 else 0.0
-    df['current_pct'] = df['current_value'] / total_portfolio * 100
+    # 전·후 분모 분리 (현금 명시 포함). 리밸런싱 자체는 자산 규모를 바꾸지 않지만 수수료·매수단가 변동 등으로
+    # 미세 차이가 있을 수 있으므로 같은 합계여도 명시적으로 분리한다.
+    stocks_before_value = float(df['current_value'].sum())
+    stocks_after_value = float(df['_after_value'].sum())
+    before_total = stocks_before_value + cash_before
+    after_total = stocks_after_value + float(remaining_cash)
 
-    # 헤더
+    # 표시용 비중 — planner의 current_pct는 보존 (덮어쓰지 않음)
+    df['_before_pct'] = (df['current_value'] / before_total * 100) if before_total > 0 else 0.0
+    df['_after_pct'] = (df['_after_value'] / after_total * 100) if after_total > 0 else 0.0
+
+    # 헤더 — 전·후 총자산과 현금을 명시해 분모 분리를 운영자에게 가시화.
     lines = [
         f'*[{account_type}] 리밸런싱 완료* · {dt_str}',
-        f'잔여 예수금: *{remaining_cash:,}원*',
+        f'전 총자산: *{before_total:,.0f}원* (현금 {cash_before:,.0f})',
+        f'후 총자산: *{after_total:,.0f}원* (현금 {remaining_cash:,.0f})',
     ]
     if trade_log_url:
         lines.append(f'<{trade_log_url}|trade_log 보기 →>')
@@ -134,7 +155,7 @@ def format_rebalancing_summary(
         nm       = str(row.get('stock_nm', row.get('ticker', '')))
         ticker   = str(row.get('ticker', ''))
         tgt_pct  = float(row['weight']) * 100
-        bef_pct  = float(row['current_pct'])
+        bef_pct  = float(row['_before_pct'])
         aft_pct  = float(row['_after_pct'])
         bef_diff = bef_pct - tgt_pct
         aft_diff = aft_pct - tgt_pct

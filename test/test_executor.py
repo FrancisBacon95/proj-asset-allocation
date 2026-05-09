@@ -85,7 +85,7 @@ def test_orderable_qty_insufficient_cash():
 # ---------------------------------------------------------------------------- #
 
 def test_execute_order_required_exceeds_enable():
-    """2-1. 계획수량 > 가능수량: required=100, enable=50 → transaction=50, calc_price 보존."""
+    """2-1. 계획수량 > 가능수량: required=100, enable=50 → requested=50, filled=50."""
     ex = _make_executor()
     plan_row = {
         'ticker': '005930', 'required_quantity': 100,
@@ -96,16 +96,20 @@ def test_execute_order_required_exceeds_enable():
          patch.object(type(ex.kis_client), 'create_domestic_order', mock_order):
         result = ex._execute_order(plan_row, order_index=0, available_cash=1_000_000)
     assert result['enable_quantity'] == 50
-    assert result['transaction_quantity'] == 50, f'min(100,50)=50 기대, 실제 {result["transaction_quantity"]}'
-    assert result['calc_price'] == 10_000, f'calc_price 보존돼야 함, 실제 {result.get("calc_price")}'
-    assert result['skipped_reason'] is None, f'정상 주문은 skipped_reason None, 실제 {result["skipped_reason"]}'
+    # ARCH-004: requested = KIS에 요청한 수량, filled = 성공 체결 수량
+    assert result['requested_quantity'] == 50, f'requested=min(100,50)=50, 실제 {result["requested_quantity"]}'
+    assert result['filled_quantity'] == 50, f'성공이면 filled=requested, 실제 {result["filled_quantity"]}'
+    # transaction_quantity (deprecated alias) = filled
+    assert result['transaction_quantity'] == 50
+    assert result['calc_price'] == 10_000
+    assert result['skipped_reason'] is None
     assert result['is_success'] is True
     assert mock_order.call_count == 1, '체결 시도 1회 호출돼야 함'
-    print('✅ 2-1 _execute_order min(): required=100 ∧ enable=50 → transaction=50, calc_price=10000')
+    print('✅ 2-1 _execute_order min(): requested=50, filled=50, transaction_quantity=50(alias)')
 
 
 def test_execute_order_zero_quantity_skips():
-    """2-2. 가능수량=0: transaction=0, skipped_reason='zero_quantity', 주문 미호출."""
+    """2-2. 가능수량=0: requested=0, filled=0, skipped_reason='zero_quantity', 주문 미호출."""
     ex = _make_executor()
     plan_row = {
         'ticker': '005930', 'required_quantity': 100,
@@ -115,13 +119,37 @@ def test_execute_order_zero_quantity_skips():
     with patch.object(ex, '_get_orderable_qty', return_value=(0, 10_000)), \
          patch.object(type(ex.kis_client), 'create_domestic_order', mock_order):
         result = ex._execute_order(plan_row, order_index=0, available_cash=1_000_000)
-    assert result['transaction_quantity'] == 0
+    assert result['requested_quantity'] == 0
+    assert result['filled_quantity'] == 0
+    assert result['transaction_quantity'] == 0  # alias
     assert result['skipped_reason'] == 'zero_quantity'
-    assert result['calc_price'] == 10_000, 'zero_quantity여도 calc_price는 보존'
-    assert result['is_success'] is None, '주문 미호출 시 is_success=None'
+    assert result['calc_price'] == 10_000
+    assert result['is_success'] is None
     assert result['response_msg'] is None
-    assert mock_order.call_count == 0, '가능수량 0이면 create_domestic_order 호출 금지'
-    print('✅ 2-2 _execute_order zero_quantity: skip + 주문 미호출 + calc_price 보존')
+    assert mock_order.call_count == 0
+    print('✅ 2-2 _execute_order zero_quantity: requested=0, filled=0, 주문 미호출')
+
+
+def test_execute_order_failed_order_filled_zero():
+    """2-3 신규 (ARCH-004 + ARCH-008): KIS 응답 rt_cd != '0'일 때 requested>0, filled=0."""
+    ex = _make_executor()
+    plan_row = {
+        'ticker': '005930', 'required_quantity': 100,
+        'required_transaction': 'buy', 'current_price': 10000,
+    }
+    # KIS가 주문 거절: rt_cd='1' (실패)
+    mock_order = MagicMock(return_value={'rt_cd': '1', 'msg1': 'rejected'})
+    with patch.object(ex, '_get_orderable_qty', return_value=(50, 10_000)), \
+         patch.object(type(ex.kis_client), 'create_domestic_order', mock_order):
+        result = ex._execute_order(plan_row, order_index=0, available_cash=1_000_000)
+    # 우리는 50주를 요청했지만 KIS가 거절 → filled=0
+    assert result['requested_quantity'] == 50, '요청 수량은 보존 (감사 추적)'
+    assert result['filled_quantity'] == 0, '실패 주문은 filled=0 (ARCH-008 — 잔여 차감 안 됨)'
+    assert result['transaction_quantity'] == 0, 'alias도 filled=0'
+    assert result['is_success'] is False, 'rt_cd != 0 → is_success=False'
+    assert result['response_msg'] == 'rejected'
+    assert mock_order.call_count == 1, '주문 시도는 했음 (실패할 뿐)'
+    print('✅ 2-3 ARCH-004/008: 실패 주문 → requested=50, filled=0 (잔여 차감 보호)')
 
 
 # ---------------------------------------------------------------------------- #
@@ -129,7 +157,7 @@ def test_execute_order_zero_quantity_skips():
 # ---------------------------------------------------------------------------- #
 
 def test_execute_order_test_mode_skips_real_order():
-    """3-1. is_test=True: enable=50, required=50이어도 transaction=0, 주문 미호출."""
+    """3-1. is_test=True: enable=50, required=50이어도 requested=0, filled=0 (실 KIS 호출 자체 안 함)."""
     ex = _make_executor(is_test=True)
     plan_row = {
         'ticker': '005930', 'required_quantity': 50,
@@ -139,12 +167,15 @@ def test_execute_order_test_mode_skips_real_order():
     with patch.object(ex, '_get_orderable_qty', return_value=(50, 10_000)), \
          patch.object(type(ex.kis_client), 'create_domestic_order', mock_order):
         result = ex._execute_order(plan_row, order_index=0, available_cash=1_000_000)
-    assert result['enable_quantity'] == 50, 'enable_quantity는 그대로 50 보고'
-    assert result['transaction_quantity'] == 0, 'is_test 모드에서는 transaction=0'
+    assert result['enable_quantity'] == 50
+    # is_test에서는 KIS에 요청 자체를 안 했으므로 requested=0
+    assert result['requested_quantity'] == 0, 'is_test에서는 KIS에 요청 안 함 → requested=0'
+    assert result['filled_quantity'] == 0
+    assert result['transaction_quantity'] == 0  # alias
     assert result['skipped_reason'] == 'test_mode'
-    assert result['calc_price'] == 10_000, 'is_test 모드에서도 calc_price는 보존'
+    assert result['calc_price'] == 10_000
     assert mock_order.call_count == 0, 'is_test=True에서는 절대 create_domestic_order 호출 금지'
-    print('✅ 3-1 is_test=True: 실주문 미호출 + skipped_reason=test_mode + calc_price 보존')
+    print('✅ 3-1 is_test=True: requested=0, filled=0, 실주문 미호출')
 
 
 # ---------------------------------------------------------------------------- #
@@ -152,21 +183,26 @@ def test_execute_order_test_mode_skips_real_order():
 # ---------------------------------------------------------------------------- #
 
 _ORDER_RESULT_KEYS = [
-    'ticker', 'enable_quantity', 'transaction_quantity', 'calc_price',
-    'skipped_reason', 'is_success', 'response_msg', 'transaction_order',
+    'ticker', 'enable_quantity',
+    'requested_quantity', 'filled_quantity', 'transaction_quantity',  # ARCH-004
+    'calc_price', 'skipped_reason', 'is_success', 'response_msg', 'transaction_order',
 ]
 
 
-def _stub_order_result(ticker: str, transaction_quantity: int, transaction_order: int,
-                       calc_price: int = None) -> dict:
+def _stub_order_result(ticker: str, filled_quantity: int, transaction_order: int,
+                       calc_price: int = None, requested_quantity: int = None) -> dict:
+    """기본 stub: 성공 케이스(filled=requested). requested_quantity 명시하면 분리 가능."""
+    requested = requested_quantity if requested_quantity is not None else filled_quantity
     return {
         'ticker': ticker,
-        'enable_quantity': transaction_quantity,
-        'transaction_quantity': transaction_quantity,
+        'enable_quantity': max(filled_quantity, requested),
+        'requested_quantity': requested,
+        'filled_quantity': filled_quantity,
+        'transaction_quantity': filled_quantity,  # deprecated alias = filled
         'calc_price': calc_price,
         'skipped_reason': None,
-        'is_success': True,
-        'response_msg': 'ok',
+        'is_success': filled_quantity > 0,
+        'response_msg': 'ok' if filled_quantity > 0 else None,
         'transaction_order': transaction_order,
     }
 
@@ -255,6 +291,40 @@ def test_run_rebalancing_uses_calc_price_for_deduction():
     print('✅ 4-3 run_rebalancing: 잔여 차감이 calc_price 기준 (보수적)')
 
 
+def test_run_rebalancing_failed_order_no_deduction():
+    """4-4 신규 (ARCH-008): KIS 주문 실패(rt_cd!='0')는 filled=0이므로 잔여 차감 안 됨.
+
+    requested=50이지만 filled=0인 stub → 차감 0 → 두 번째 매수 시 잔여 그대로.
+    """
+    ex = _make_executor()
+    plan_df = pd.DataFrame([
+        {'ticker': '005930', 'required_quantity': 100, 'required_transaction': 'buy', 'current_price': 5000},
+        {'ticker': '000660', 'required_quantity': 50,  'required_transaction': 'buy', 'current_price': 4000},
+    ])
+    with patch.object(type(ex.kis_client), 'fetch_buy_orderable_cash', return_value=1_000_000), \
+         patch.object(type(ex.kis_client), 'fetch_domestic_cash_balance', return_value=1_000_000), \
+         patch.object(ex, '_execute_order') as mock_exec:
+        # 첫 주문: requested=50, filled=0 (KIS 거절)
+        failed_stub = {
+            'ticker': '005930', 'enable_quantity': 50,
+            'requested_quantity': 50, 'filled_quantity': 0, 'transaction_quantity': 0,
+            'calc_price': 5500, 'skipped_reason': None, 'is_success': False,
+            'response_msg': 'rejected', 'transaction_order': 0,
+        }
+        mock_exec.side_effect = [
+            failed_stub,
+            _stub_order_result('000660', 50, 1, calc_price=4500),
+        ]
+        ex.run_rebalancing(plan_df)
+
+    assert mock_exec.call_args_list[0].kwargs['available_cash'] == 1_000_000
+    # 첫 주문 filled=0이므로 잔여 차감 0 → 두 번째도 1,000,000 그대로
+    assert mock_exec.call_args_list[1].kwargs['available_cash'] == 1_000_000, (
+        f'KIS 거절 주문(filled=0)은 차감 안 됨. 실제 {mock_exec.call_args_list[1].kwargs["available_cash"]:,}'
+    )
+    print('✅ 4-4 ARCH-008: 실패 주문(filled=0)은 잔여 차감 안 됨 (요청 수량 보존)')
+
+
 if __name__ == '__main__':
     test_orderable_qty_basic()
     test_orderable_qty_buffer_boundary()
@@ -262,8 +332,10 @@ if __name__ == '__main__':
     test_orderable_qty_insufficient_cash()
     test_execute_order_required_exceeds_enable()
     test_execute_order_zero_quantity_skips()
+    test_execute_order_failed_order_filled_zero()
     test_execute_order_test_mode_skips_real_order()
     test_run_rebalancing_remaining_cash_decremented()
     test_run_rebalancing_zero_fill_keeps_remaining_cash()
     test_run_rebalancing_uses_calc_price_for_deduction()
+    test_run_rebalancing_failed_order_no_deduction()
     print('\n전체 테스트 통과')
