@@ -223,6 +223,29 @@ def test_isa_helpers_return_general_endpoints():
     print('✅ ISA·일반(postfix=01): 헬퍼들이 일반 TR_ID·URL 반환')
 
 
+def test_pension_savings_uses_nrcvb_not_max_buy_amt():
+    """PPA(연금저축, postfix='22')는 ISA처럼 nrcvb_buy_amt 사용 (max_buy_amt 폴백 안 함).
+
+    이번 사고의 silent failure 직접 재발 방지선:
+    - PPA를 IRP로 잘못 분기시키면 max_buy_amt(보통 0)를 반환해 매수 차단.
+    - PPA는 ISA 엔드포인트라 nrcvb_buy_amt가 응답에 정상 존재.
+    """
+    client = _make_client_skipping_init(acc_no_postfix='22')
+    response_with_nrcvb = {
+        'ord_psbl_cash': '0',
+        'ruse_psbl_amt': '0',
+        'psbl_qty_calc_unpr': '70000',
+        'nrcvb_buy_amt': '191209',  # ← PPA(연금저축)는 ISA 엔드포인트라 nrcvb 응답 옴
+        'max_buy_amt': '0',
+        'max_buy_qty': '0',
+    }
+    with patch.object(type(client), 'fetch_domestic_enable_buy', return_value=response_with_nrcvb):
+        orderable = client.fetch_buy_orderable_cash()
+    assert orderable == 191_209, f'PPA는 nrcvb_buy_amt(191,209) 반환, max_buy_amt 폴백 X. 실제 {orderable:,}'
+    assert isinstance(orderable, int)
+    print('✅ PPA(연금저축): nrcvb_buy_amt 사용 (ISA와 동일, silent failure 재발 방지)')
+
+
 def test_irp_buy_orderable_uses_max_buy_amt():
     """IRP(postfix='29')에서 fetch_buy_orderable_cash가 max_buy_amt를 반환하는지.
 
@@ -287,7 +310,8 @@ def test_irp_breakdown_output2_dict_form():
     """IRP 응답은 output2가 dict 단일 (ISA는 list of dict). 양쪽 모두 정상 파싱돼야 한다.
 
     fetch_domestic_cash_breakdown은 raw_o2가 list면 [0], 아니면 그대로 사용.
-    IRP의 dict-form 분기와 누락 필드 안전 처리(.get(key, 0))를 동시 검증.
+    IRP의 dict-form 분기 + thdt_buy/sll_amt 부재 시 .get() 폴백 동시 검증.
+    핵심 필드(dnca/nxdy/prvs/scts/tot)는 ISA·IRP 모두 응답하는 것이 KIS 보장 (실측).
     """
     pension_response = {
         'output1': [],
@@ -295,7 +319,9 @@ def test_irp_breakdown_output2_dict_form():
             'dnca_tot_amt': '100000',
             'nxdy_excc_amt': '110000',
             'prvs_rcdl_excc_amt': '120000',
-            # IRP에서 일부 필드 부재 가능 (scts_evlu_amt, tot_evlu_amt 등)
+            'scts_evlu_amt': '0',
+            'tot_evlu_amt': '120000',
+            # thdt_buy_amt, thdt_sll_amt 부재 (거래 없는 날) → .get() 폴백
         },
         'tr_cont': 'D',
     }
@@ -305,17 +331,47 @@ def test_irp_breakdown_output2_dict_form():
     assert breakdown['dnca_tot_amt'] == 100_000
     assert breakdown['nxdy_excc_amt'] == 110_000
     assert breakdown['prvs_rcdl_excc_amt'] == 120_000
-    assert breakdown['scts_evlu_amt'] == 0, '부재 필드는 0으로 안전 처리'
-    assert breakdown['tot_evlu_amt'] == 0, '부재 필드는 0으로 안전 처리'
-    print('✅ IRP: output2 dict-form 파싱 + 부재 필드 0 처리')
+    assert breakdown['scts_evlu_amt'] == 0
+    assert breakdown['tot_evlu_amt'] == 120_000
+    assert breakdown['thdt_buy_amt'] == 0, '거래 없는 날 thdt_buy_amt 부재 시 .get() 폴백 → 0'
+    assert breakdown['thdt_sll_amt'] == 0
+    print('✅ IRP: output2 dict-form 파싱 + thdt_buy/sll_amt 부재 시 0 폴백')
+
+
+def test_breakdown_missing_core_field_raises_keyerror():
+    """핵심 필드(prvs_rcdl_excc_amt 등) 부재 시 KeyError로 즉시 실패해야 한다.
+
+    Codex P0 #1 회귀 방지선: silent하게 0을 반환하면 자산배분 로직이 잘못된
+    잔액으로 매수 시도. KeyError가 surface되면 운영자가 알아차리고 KIS 응답
+    변경에 대응 가능.
+    """
+    broken_response = {
+        'output1': [],
+        'output2': {
+            'dnca_tot_amt': '100000',
+            # prvs_rcdl_excc_amt 부재 — D+2 매수 기준값 누락
+            'nxdy_excc_amt': '110000',
+            'scts_evlu_amt': '0',
+            'tot_evlu_amt': '110000',
+        },
+        'tr_cont': 'D',
+    }
+    client = _make_client_skipping_init(acc_no_postfix='01')
+    with patch.object(type(client), '_domestic_balance_page', return_value=broken_response):
+        try:
+            client.fetch_domestic_cash_breakdown()
+            assert False, '핵심 필드 부재 시 KeyError 발생해야 함 (silent 0 반환 X)'
+        except KeyError as e:
+            assert 'prvs_rcdl_excc_amt' in str(e), f'누락 필드 명시돼야 함, 실제 {e}'
+    print('✅ 핵심 필드 부재 시 KeyError로 silent failure 방지 (Codex P0 #1)')
 
 
 def test_domestic_balance_page_pension_request_params():
-    """PPA `_domestic_balance_page`가 _get에 정확한 URL/TR_ID/params를 전달하는지 검증.
+    """IRP `_domestic_balance_page`가 _get에 정확한 URL/TR_ID/params를 전달하는지 검증.
 
     paramsdict 자체가 잘못되면 KIS는 silent하게 빈 응답을 줄 수 있음.
-    - PPA: ACCA_DVSN_CD='00', INQR_DVSN='00', ISA 전용 키 부재
-    - ACNT_PRDT_CD는 acc_no_postfix 그대로 (KIS doc "29 고정"은 예시)
+    - IRP: ACCA_DVSN_CD='00', INQR_DVSN='00', ISA 전용 키 부재
+    - ACNT_PRDT_CD는 acc_no_postfix 그대로 (KIS doc "29"는 예시)
     """
     # IRP postfix='29' 케이스
     client = _make_client_skipping_init(acc_no_postfix='29')
@@ -331,13 +387,13 @@ def test_domestic_balance_page_pension_request_params():
     assert tr_id == 'TTTC2208R'
     assert params['CANO'] == '00000000'
     assert params['ACNT_PRDT_CD'] == '29', f'IRP postfix는 그대로 전달, 실제 {params["ACNT_PRDT_CD"]}'
-    assert params['ACCA_DVSN_CD'] == '00', 'PPA/IRP 필수 파라미터'
+    assert params['ACCA_DVSN_CD'] == '00', 'IRP 필수 파라미터'
     assert params['INQR_DVSN'] == '00'
     # ISA 전용 키 부재 확인 (있으면 KIS가 reject하거나 무시)
     isa_only_keys = ('AFHR_FLPR_YN', 'OFL_YN', 'UNPR_DVSN',
                      'FUND_STTL_ICLD_YN', 'FNCG_AMT_AUTO_RDPT_YN', 'PRCS_DVSN')
     for key in isa_only_keys:
-        assert key not in params, f'PPA params에 ISA 전용 키 {key} 포함됨'
+        assert key not in params, f'IRP params에 ISA 전용 키 {key} 포함됨'
 
     # ISA postfix='01' 비교 — ACCA_DVSN_CD 부재 + ISA 전용 키 존재
     isa_client = _make_client_skipping_init(acc_no_postfix='01')
@@ -347,7 +403,7 @@ def test_domestic_balance_page_pension_request_params():
     assert 'ACCA_DVSN_CD' not in isa_params, 'ISA에는 ACCA_DVSN_CD 부재여야 함'
     assert isa_params['AFHR_FLPR_YN'] == 'N'
     assert isa_params['INQR_DVSN'] == '01', 'ISA INQR_DVSN은 01'
-    print('✅ _domestic_balance_page params: PPA/IRP=ACCA_DVSN_CD+INQR_DVSN=00, ISA=ISA 전용 셋')
+    print('✅ _domestic_balance_page params: IRP=ACCA_DVSN_CD+INQR_DVSN=00, ISA=ISA 전용 셋')
 
 
 def test_fetch_domestic_enable_buy_irp_request_params():
@@ -460,10 +516,12 @@ if __name__ == '__main__':
     test_irp_helpers_return_pension_endpoints()
     test_pension_savings_uses_general_endpoints()
     test_isa_helpers_return_general_endpoints()
+    test_pension_savings_uses_nrcvb_not_max_buy_amt()
     test_irp_buy_orderable_uses_max_buy_amt()
     # tester 추가 (IRP/PPA 분리 갱신 후)
     test_irp_buy_orderable_missing_max_buy_amt_raises_keyerror()
     test_irp_breakdown_output2_dict_form()
+    test_breakdown_missing_core_field_raises_keyerror()
     test_domestic_balance_page_pension_request_params()
     test_fetch_domestic_enable_buy_irp_request_params()
     test_create_domestic_order_irp_includes_acca_dvsn_cd()

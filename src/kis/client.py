@@ -18,6 +18,44 @@ logger = get_logger(__name__)
 DUMMY_TICKER_FOR_ORDERABLE_CASH = '005930'  # 삼성전자, 상장폐지 위험 사실상 없음
 
 
+# === KIS 응답 안전 추출 유틸 =============================================== #
+# 비즈니스 로직(메서드 본문)을 깨끗이 유지하기 위한 모듈 레벨 사적 헬퍼.
+# - _require_int / _optional_int: silent failure 방지 + 선택 필드 폴백 명시
+# - _normalize_output2 / _normalize_output1: ISA(list)/IRP(dict) 응답 형식 통일
+
+def _require_int(d: dict, key: str) -> int:
+    """KIS 응답의 필수 정수 필드. 누락·빈문자열·변환실패 시 KeyError/ValueError로 즉시 실패.
+
+    silent failure 방지 — 빈 응답이면 명시적으로 폭발해 운영자가 발견하도록.
+    """
+    return int(d[key])
+
+
+def _optional_int(d: dict, key: str, default: int = 0) -> int:
+    """KIS 응답의 선택 정수 필드. 누락·빈문자열·변환실패 시 default 반환."""
+    v = d.get(key, default)
+    if v in (None, ''):
+        return default
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_output2(raw) -> dict:
+    """잔고조회 output2 형식 정규화 (ISA list / IRP dict 모두 dict 단일로)."""
+    if isinstance(raw, list):
+        return raw[0] if raw else {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _normalize_output1(raw) -> list:
+    """잔고조회 output1 형식 정규화 (단일 dict면 list 감싸기, list면 그대로)."""
+    if isinstance(raw, list):
+        return raw
+    return [raw] if raw else []
+
+
 class KISClient():
     '''
     한국투자증권 REST API
@@ -148,10 +186,11 @@ class KISClient():
         )
 
     # ------------------------------------------------------------------ #
-    # 계좌 유형 분기 헬퍼 (ISA vs 퇴직연금 PPA/IRP)                              #
+    # 계좌 유형 분기 헬퍼 (ISA·연금저축 vs IRP)                                   #
     # ------------------------------------------------------------------ #
-    # acc_no_postfix '01' = ISA(일반/위탁), '22'/'29' = 퇴직연금 (PPA/IRP).
-    # 퇴직연금은 모의투자 미지원이므로 잔고/매수가능 TR_ID 모두 실전 단일.
+    # acc_no_postfix '01' = ISA(일반/위탁), '22' = 연금저축(PPA — ISA와 동일 처리),
+    # '29' = IRP(개인형 퇴직연금 — KIS 퇴직연금 전용 엔드포인트 사용).
+    # IRP는 모의투자 미지원이므로 잔고/매수가능 TR_ID 모두 실전 단일.
 
     def _is_pension(self) -> bool:
         """IRP(개인형 퇴직연금) 계좌 여부.
@@ -162,35 +201,35 @@ class KISClient():
         return self.acc_no_postfix == '29'
 
     def _balance_tr_id(self) -> str:
-        """국내주식 잔고조회 TR_ID. 퇴직연금은 TTTC2208R(모의 미지원), ISA는 TTTC8434R/VTTC8434R."""
+        """국내주식 잔고조회 TR_ID. IRP는 TTTC2208R(모의 미지원), ISA·연금저축은 TTTC8434R/VTTC8434R."""
         if self._is_pension():
             return 'TTTC2208R'
         return 'VTTC8434R' if self.mock else 'TTTC8434R'
 
     def _orderable_tr_id(self) -> str:
-        """국내주식 매수가능조회 TR_ID. 퇴직연금은 TTTC0503R(모의 미지원), ISA는 TTTC8908R."""
+        """국내주식 매수가능조회 TR_ID. IRP는 TTTC0503R(모의 미지원), ISA·연금저축은 TTTC8908R."""
         if self._is_pension():
             return 'TTTC0503R'
         return 'TTTC8908R'
 
     def _balance_url(self) -> str:
-        """국내주식 잔고조회 URL path. 퇴직연금은 /pension/ 경로."""
+        """국내주식 잔고조회 URL path. IRP는 /pension/ 경로, ISA·연금저축은 일반 경로."""
         if self._is_pension():
             return 'uapi/domestic-stock/v1/trading/pension/inquire-balance'
         return 'uapi/domestic-stock/v1/trading/inquire-balance'
 
     def _orderable_url(self) -> str:
-        """국내주식 매수가능조회 URL path. 퇴직연금은 /pension/ 경로."""
+        """국내주식 매수가능조회 URL path. IRP는 /pension/ 경로, ISA·연금저축은 일반 경로."""
         if self._is_pension():
             return 'uapi/domestic-stock/v1/trading/pension/inquire-psbl-order'
         return 'uapi/domestic-stock/v1/trading/inquire-psbl-order'
 
     def _order_tr_id(self, transaction_type: str) -> str:
-        """매수/매도 주문 TR_ID. ISA·퇴직연금 동일하게 추정 (공식 doc 없음).
+        """매수/매도 주문 TR_ID. ISA·연금저축·IRP 동일하게 추정 (공식 doc 없음).
 
-        KIS 공식 API 목록(`kis_api_docs/md/한투_API_목록.md`)에 퇴직연금 전용 주문 API가
-        부재. 일반 주식주문(현금) 엔드포인트로 호환되는 것으로 추정. 만약 미래에 PPA
-        전용 TR_ID가 발견되면 본 헬퍼에서 분기.
+        KIS 공식 API 목록(`kis_api_docs/md/한투_API_목록.md`)에 IRP 전용 주문 API가
+        부재. 일반 주식주문(현금) 엔드포인트로 호환되는 것으로 추정. 만약 미래에
+        IRP 전용 TR_ID가 발견되면 본 헬퍼에서 분기.
         """
         if transaction_type == 'buy':
             return 'TTTC0802U'
@@ -225,25 +264,17 @@ class KISClient():
 
         참고: docs/kis_cash_guide.md
         """
-        # output2 형태: ISA는 [dict] (list of one), 퇴직연금은 dict 단일. 둘 다 dict로 정규화.
-        raw_o2 = self._domestic_balance_page()['output2']
-        output2 = raw_o2[0] if isinstance(raw_o2, list) else raw_o2
-
-        # 일부 필드는 PPA 응답에 없을 수 있어 .get(key, 0) 보호.
-        def _to_int(v) -> int:
-            try:
-                return int(v) if v not in (None, '') else 0
-            except (TypeError, ValueError):
-                return 0
-
+        output2 = _normalize_output2(self._domestic_balance_page()['output2'])
         return {
-            'dnca_tot_amt': _to_int(output2.get('dnca_tot_amt', 0)),
-            'nxdy_excc_amt': _to_int(output2.get('nxdy_excc_amt', 0)),
-            'prvs_rcdl_excc_amt': _to_int(output2.get('prvs_rcdl_excc_amt', 0)),
-            'thdt_buy_amt': _to_int(output2.get('thdt_buy_amt', 0)),
-            'thdt_sll_amt': _to_int(output2.get('thdt_sll_amt', 0)),
-            'scts_evlu_amt': _to_int(output2.get('scts_evlu_amt', 0)),
-            'tot_evlu_amt': _to_int(output2.get('tot_evlu_amt', 0)),
+            # 필수 — silent failure 방지 (누락 시 KeyError로 즉시 실패)
+            'dnca_tot_amt':       _require_int(output2, 'dnca_tot_amt'),
+            'nxdy_excc_amt':      _require_int(output2, 'nxdy_excc_amt'),
+            'prvs_rcdl_excc_amt': _require_int(output2, 'prvs_rcdl_excc_amt'),
+            'scts_evlu_amt':      _require_int(output2, 'scts_evlu_amt'),
+            'tot_evlu_amt':       _require_int(output2, 'tot_evlu_amt'),
+            # 선택 — 거래 없는 날 부재 가능
+            'thdt_buy_amt':       _optional_int(output2, 'thdt_buy_amt'),
+            'thdt_sll_amt':       _optional_int(output2, 'thdt_sll_amt'),
         }
 
     @log_method_call
@@ -280,8 +311,8 @@ class KISClient():
         fk100, nk100 = "", ""
         while True:
             data = self._domestic_balance_page(fk100, nk100)
-            output['output1'].extend(data['output1'])
-            output['output2'].extend(data['output2'])
+            output['output1'].extend(_normalize_output1(data['output1']))
+            output['output2'].append(_normalize_output2(data['output2']))
             # tr_cont가 'D' 또는 'E'이면 마지막 페이지
             if data['tr_cont'] in ('D', 'E'):
                 break
@@ -292,14 +323,14 @@ class KISClient():
     def _domestic_balance_page(self, ctx_area_fk100: str = "", ctx_area_nk100: str = "") -> dict:
         """국내 잔고 단일 페이지를 조회한다. 페이지네이션 연속 키를 포함해 반환한다.
 
-        ISA/위탁: TTTC8434R(VTTC8434R 모의), 퇴직연금(PPA/IRP): TTTC2208R(모의 미지원).
+        ISA·연금저축: TTTC8434R(VTTC8434R 모의), IRP: TTTC2208R(모의 미지원).
         URL/TR_ID/params 모두 계좌 유형에 따라 분기된다.
-        - 퇴직연금은 ACNT_PRDT_CD='29' 고정, 필수 파라미터는 ACCA_DVSN_CD/INQR_DVSN.
-        - ISA는 acc_no_postfix 그대로(보통 '01') 및 ISA 전용 파라미터 셋 사용.
+        - IRP는 ACCA_DVSN_CD/INQR_DVSN='00' 필수, ISA 전용 파라미터 부재.
+        - ISA·연금저축은 acc_no_postfix 그대로 + ISA 전용 파라미터 셋 사용.
         """
         if self._is_pension():
-            # ACNT_PRDT_CD는 acc_no_postfix 그대로 사용. KIS doc의 "29"는 예시일 뿐
-            # 실제로는 계좌별 postfix(PPA='22', IRP='29' 등)를 그대로 보내야 정상 응답.
+            # ACNT_PRDT_CD는 acc_no_postfix 그대로 사용. KIS doc의 "29"는 예시일 뿐.
+            # IRP는 postfix='29'를 그대로 보내야 정상 응답.
             params = {
                 'CANO': self.acc_no_prefix,
                 'ACNT_PRDT_CD': self.acc_no_postfix,
@@ -463,16 +494,16 @@ class KISClient():
     def fetch_domestic_enable_buy(self, ticker: str, ord_dvsn: str = '01', price: int = -1) -> dict:
         """국내주식 매수 가능 금액/수량을 조회한다.
 
-        ISA/위탁: TTTC8908R, 퇴직연금(PPA/IRP): TTTC0503R(모의 미지원).
+        ISA·연금저축: TTTC8908R, IRP: TTTC0503R(모의 미지원).
         URL/params 모두 계좌 유형에 따라 분기된다.
-        - 퇴직연금은 ACNT_PRDT_CD='29' 고정, ACCA_DVSN_CD='00' 필수.
-        - ISA는 CMA_EVLU_AMT_ICLD_YN/OVRS_ICLD_YN 사용.
+        - IRP는 ACCA_DVSN_CD='00' 필수.
+        - ISA·연금저축은 OVRS_ICLD_YN='N' 사용. CMA_EVLU_AMT_ICLD_YN은 양 doc 모두 Required.
 
         Args:
             ord_dvsn (str): 주문구분 (01: 시장가, 00: 지정가)
             price (int): 지정가 주문 시 주문단가. 시장가(ord_dvsn='01')일 때는 무시된다.
         """
-        # ACNT_PRDT_CD는 acc_no_postfix 그대로 사용 (PPA='22' 등). KIS doc "29"는 예시.
+        # ACNT_PRDT_CD는 acc_no_postfix 그대로 사용. KIS doc "29"는 예시 (실측 확인).
         params = {
             'CANO': self.acc_no_prefix,
             'ACNT_PRDT_CD': self.acc_no_postfix,
@@ -482,18 +513,18 @@ class KISClient():
             'CMA_EVLU_AMT_ICLD_YN': 'Y',  # 양 doc 모두 Required
         }
         if self._is_pension():
-            params['ACCA_DVSN_CD'] = '00'   # 적립금구분(전체)
+            params['ACCA_DVSN_CD'] = '00'   # IRP 적립금구분(전체)
         else:
-            params['OVRS_ICLD_YN'] = 'N'    # ISA 전용 (PPA doc에 없음)
+            params['OVRS_ICLD_YN'] = 'N'    # ISA·연금저축 전용 (IRP doc에 없음)
         return self._get(self._orderable_url(), self._orderable_tr_id(), params).json()['output']
 
     @log_method_call
     def fetch_buy_orderable_cash(self) -> int:
         """미수 없는 매수 가능 한도를 반환한다.
 
-        ISA: inquire-psbl-order의 nrcvb_buy_amt(미수없는 매수 가능 금액)를 사용.
-        퇴직연금(PPA/IRP): 응답에 nrcvb_buy_amt가 없으므로 max_buy_amt를 사용.
-            퇴직연금은 미수 거래가 법적으로 불가능하므로 max_buy_amt가 의미상
+        ISA·연금저축(PPA): inquire-psbl-order의 nrcvb_buy_amt(미수없는 매수 가능 금액)를 사용.
+        IRP: 응답에 nrcvb_buy_amt가 없으므로 max_buy_amt를 사용.
+            IRP는 미수 거래가 법적으로 불가능하므로 max_buy_amt가 의미상
             ISA의 nrcvb_buy_amt와 동등(=안전한 매수 한도)이다.
 
         nrcvb_buy_amt(또는 max_buy_amt) 자체가 종목 무관 계좌 단위 상수임이
@@ -610,9 +641,9 @@ class KISClient():
         (TTTC0802U 매수 / TTTC0801U 매도). KIS 공식 API 목록에 퇴직연금 전용 주문 API
         부재. 미래에 PPA 전용 TR_ID가 발견되면 헬퍼만 수정.
 
-        ACNT_PRDT_CD는 acc_no_postfix 그대로 (PPA='22'/IRP='29'/ISA='01').
-        퇴직연금에서는 잔고/매수가능조회와 일관되게 `ACCA_DVSN_CD='00'`을 추가
-        (보수적 — 1.4·1.5 분기 결과와 동일 패턴).
+        ACNT_PRDT_CD는 acc_no_postfix 그대로 (ISA='01'/PPA='22'/IRP='29').
+        IRP에서는 잔고/매수가능조회와 일관되게 `ACCA_DVSN_CD='00'`을 추가
+        (보수적 — _is_pension() 분기와 동일 패턴). PPA(연금저축)는 ISA로 처리되므로 추가 안 함.
 
         Args:
             transaction_type (str): 'buy' (매수) 또는 'sell' (매도)
@@ -630,7 +661,7 @@ class KISClient():
             "ORD_UNPR": unpr,
         }
         if self._is_pension():
-            # 퇴직연금 매수가능조회와 일관되게 ACCA_DVSN_CD='00' 추가 (보수적)
+            # IRP 매수가능조회와 일관되게 ACCA_DVSN_CD='00' 추가 (보수적)
             data["ACCA_DVSN_CD"] = "00"
         # 주문 API는 request body 위변조 방지를 위해 해시키 서명이 필수
         hashkey = self.issue_hashkey(data)

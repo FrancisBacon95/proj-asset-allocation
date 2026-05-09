@@ -115,6 +115,39 @@ def main() -> None:
         diff = total_value - breakdown['tot_evlu_amt']
         print(f'    ⚠️  차이 {_fmt(diff)} — 보유주식 또는 현금 산정 검토 필요')
 
+    # ------------------------------------------------------------------ #
+    # [7] silent failure 탐지 (Codex P2 #2)                                 #
+    # ------------------------------------------------------------------ #
+    # 모든 ✅ 검증은 부등식·항등식 기반이라 0=0이면 trivially 통과한다.
+    # 그러나 KIS가 빈 응답(msg_cd=KIOK0560 "조회할 내용이 없습니다")을 줄 때도
+    # 동일한 패턴이라 잘못된 엔드포인트·파라미터가 silent하게 통과할 위험.
+    # 본 케이스가 PPA postfix='22'에서 실제 발생 — 1.10c 진단으로 확인됨.
+    print('\n[7] silent failure 탐지 (모든 값 0이거나 비정상 패턴 검사)')
+    all_zero = (
+        cash_balance == 0
+        and orderable == 0
+        and stock_value == 0
+        and breakdown['tot_evlu_amt'] == 0
+    )
+    stocks_but_no_cash = (
+        stock_value > 0 and cash_balance == 0 and orderable == 0
+    )
+
+    if all_zero:
+        print('    ⚠️  WARNING: cash_balance·orderable·stock·tot_evlu_amt 모두 0원입니다.')
+        print('       - 정말 빈 계좌라면 정상 (KIS 앱과 비교 후 확인).')
+        print('       - 그러나 KIS 앱에 잔고가 표시된다면 silent failure 의심:')
+        print('           · 잘못된 TR_ID/URL 엔드포인트 (예: PPA가 잘못된 pension API 호출)')
+        print('           · KIS msg_cd="KIOK0560 조회할 내용이 없습니다"가 rt_cd=0 + 모든 필드 0으로 위장')
+        print('           · ACNT_PRDT_CD 등 파라미터 오류로 빈 응답')
+        print('       - raw 응답 점검: test/dump_ppa_orderable.py 형태의 진단 스크립트 권장.')
+    elif stocks_but_no_cash:
+        print('    ⚠️  WARNING: 보유주식 평가금액 > 0 이지만 cash_balance·orderable 모두 0원입니다.')
+        print('       - 모든 자금을 주식에 투입한 상태 또는 매도 직후 결제 사이클이면 정상.')
+        print('       - KIS 앱에 예수금이 표시된다면 silent failure 의심. raw 응답 점검 권장.')
+    else:
+        print('    ✅ 0=0 trivially 통과 패턴 아님 — silent failure 가능성 낮음.')
+
     print('\n=== 진단 완료. 위 D+2 값이 KIS 앱의 "예수금 (T+2)"과 일치하는지 확인하세요. ===\n')
 
 
