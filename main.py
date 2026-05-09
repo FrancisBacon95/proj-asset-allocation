@@ -14,10 +14,6 @@ from src.slack.client import slack_notify, format_rebalancing_summary, format_ir
 logger = get_logger(__name__)
 
 
-# IRP(개인형 퇴직연금) 계좌의 acc_no_postfix. 자동 매매 불가 → 플랜만 시트에 기록.
-IRP_ACC_NO_POSTFIX = '29'
-
-
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument('--account_type', type=str, required=True)
@@ -50,8 +46,7 @@ def main() -> None:
     if args.test or args.force or (is_market_open and not already_executed):
         result, remaining_cash = allocator.run()
 
-        is_irp = allocator.planner.kis_client.acc_no_postfix == IRP_ACC_NO_POSTFIX
-        if is_irp:
+        if allocator.planner.kis_client.is_irp():
             # IRP: 플랜만 생성됨. Sheets에 IRP_action_plan으로 덮어쓰기, BigQuery 적재 스킵.
             sheet_name = f'{args.account_type}_action_plan'
             gs_client.overwrite_dataframe(sheet_name, result)

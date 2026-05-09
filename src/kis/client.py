@@ -192,13 +192,21 @@ class KISClient():
     # '29' = IRP(개인형 퇴직연금 — KIS 퇴직연금 전용 엔드포인트 사용).
     # IRP는 모의투자 미지원이므로 잔고/매수가능 TR_ID 모두 실전 단일.
 
-    def _is_pension(self) -> bool:
-        """IRP(개인형 퇴직연금) 계좌 여부.
+    def is_irp(self) -> bool:
+        """IRP(개인형 퇴직연금) 계좌 여부. acc_no_postfix == '29'.
 
-        KIS 퇴직연금 전용 엔드포인트(TTTC2208R, TTTC0503R 등)는 IRP(postfix='29')에만 응답한다.
-        연금저축(PPA, postfix='22')은 ISA와 동일한 일반 위탁 엔드포인트로 처리해야 한다 (실측 확인).
+        public 메서드 — 외부 모듈(allocation.py, main.py)에서 IRP 분기에 사용.
+        KIS 퇴직연금 전용 엔드포인트(TTTC2208R, TTTC0503R 등)는 IRP에만 응답.
+        연금저축(PPA, postfix='22')은 ISA와 동일한 일반 위탁 엔드포인트로 처리.
         """
         return self.acc_no_postfix == '29'
+
+    def _is_pension(self) -> bool:
+        """KIS 퇴직연금 전용 엔드포인트 분기용 alias of is_irp() (내부 사용).
+
+        client.py 내부 분기에서 의미를 강조하기 위해 별도 이름 유지. 동작은 is_irp()와 동일.
+        """
+        return self.is_irp()
 
     def _balance_tr_id(self) -> str:
         """국내주식 잔고조회 TR_ID. IRP는 TTTC2208R(모의 미지원), ISA·연금저축은 TTTC8434R/VTTC8434R."""

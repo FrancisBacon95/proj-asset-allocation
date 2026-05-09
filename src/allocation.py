@@ -37,8 +37,8 @@ class StaticAllocator:
         total_info = self.planner.get_rebalancing_plan()
         logger.info('total_info:\n%s', total_info.to_string())
 
-        if self.planner.kis_client.acc_no_postfix == '29':
-            logger.info('IRP 계좌(postfix=29): 자동 매매 불가 — executor 스킵, 플랜만 반환')
+        if self.planner.kis_client.is_irp():
+            logger.info('IRP 계좌: 자동 매매 불가 — executor 스킵, 플랜만 반환')
             return total_info, 0
 
         trade_log, remaining_cash = self.executor.run_rebalancing(plan_df=total_info)
