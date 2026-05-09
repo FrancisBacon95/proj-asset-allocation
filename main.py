@@ -36,9 +36,17 @@ def main() -> None:
     allocation_info['weight'] = allocation_info['weight'].astype(float)
 
     allocator = StaticAllocator(account_type=args.account_type, allocation_info=allocation_info, is_test=args.test)
+    is_irp = allocator.planner.kis_client.is_irp()
 
     is_market_open = allocator.is_trading_day(kst_date)
-    already_executed = False if args.test else bq_client.is_already_executed(args.account_type, kst_date)
+    # IRP는 BigQuery에 거래 이력을 적재하지 않아 is_already_executed가 항상 False를
+    # 반환한다. 무한 재실행을 막는 진짜 빈도 제어는 외부 cron(예: Cloud Run 매달 1일)에 맡긴다.
+    if args.test or is_irp:
+        already_executed = False
+        if is_irp:
+            logger.info('IRP 계좌: is_already_executed 체크 스킵 (BQ 거래 이력 부재). cron으로 빈도 제어.')
+    else:
+        already_executed = bq_client.is_already_executed(args.account_type, kst_date)
 
     logger.info('is_market_open: %s', is_market_open)
     logger.info('is_already_executed: %s', already_executed)
@@ -46,7 +54,7 @@ def main() -> None:
     if args.test or args.force or (is_market_open and not already_executed):
         result, remaining_cash = allocator.run()
 
-        if allocator.planner.kis_client.is_irp():
+        if is_irp:
             # IRP: 플랜만 생성됨. Sheets에 IRP_action_plan으로 덮어쓰기, BigQuery 적재 스킵.
             sheet_name = f'{args.account_type}_action_plan'
             gs_client.overwrite_dataframe(sheet_name, result)
