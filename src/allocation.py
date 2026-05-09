@@ -28,9 +28,19 @@ class StaticAllocator:
 
     @log_method_call
     def run(self) -> tuple[pd.DataFrame, int]:
-        """리밸런싱 전체 플로우를 실행하고 (플랜+결과 DataFrame, 잔여 예수금) 튜플을 반환한다."""
+        """리밸런싱 전체 플로우를 실행하고 (플랜+결과 DataFrame, 잔여 예수금) 튜플을 반환한다.
+
+        IRP(개인형 퇴직연금, postfix='29') 계좌는 KIS API로 자동 매매 불가 — 사용자가
+        KIS 앱에서 수동으로 거래해야 하므로 거래 실행은 스킵하고 플랜만 반환한다.
+        반환 시그니처는 동일 (plan_df, 0).
+        """
         total_info = self.planner.get_rebalancing_plan()
         logger.info('total_info:\n%s', total_info.to_string())
+
+        if self.planner.kis_client.acc_no_postfix == '29':
+            logger.info('IRP 계좌(postfix=29): 자동 매매 불가 — executor 스킵, 플랜만 반환')
+            return total_info, 0
+
         trade_log, remaining_cash = self.executor.run_rebalancing(plan_df=total_info)
         result = total_info.merge(trade_log, on='ticker', how='outer')
         return result, remaining_cash

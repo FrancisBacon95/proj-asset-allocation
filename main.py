@@ -9,9 +9,13 @@ from src.config.env import GOOGLE_SHEET_URL
 from src.sheets.client import GoogleSheetsClient
 from src.bigquery.client import BigQueryClient
 from src.allocation import StaticAllocator
-from src.slack.client import slack_notify, format_rebalancing_summary
+from src.slack.client import slack_notify, format_rebalancing_summary, format_irp_plan_summary
 
 logger = get_logger(__name__)
+
+
+# IRP(개인형 퇴직연금) 계좌의 acc_no_postfix. 자동 매매 불가 → 플랜만 시트에 기록.
+IRP_ACC_NO_POSTFIX = '29'
 
 
 def _parse_args() -> argparse.Namespace:
@@ -46,18 +50,34 @@ def main() -> None:
     if args.test or args.force or (is_market_open and not already_executed):
         result, remaining_cash = allocator.run()
 
-        trade_log_url = gs_client.get_worksheet_url(f'{args.account_type}_trade_log')
-        summary = format_rebalancing_summary(
-            result_df=result,
-            remaining_cash=remaining_cash,
-            account_type=args.account_type,
-            dt=kst_now,
-            trade_log_url=trade_log_url,
-        )
-        slack_notify(f'[{args.account_type}] 리밸런싱 완료', summary)
+        is_irp = allocator.planner.kis_client.acc_no_postfix == IRP_ACC_NO_POSTFIX
+        if is_irp:
+            # IRP: 플랜만 생성됨. Sheets에 IRP_action_plan으로 덮어쓰기, BigQuery 적재 스킵.
+            sheet_name = f'{args.account_type}_action_plan'
+            gs_client.overwrite_dataframe(sheet_name, result)
+            sheet_url = gs_client.get_worksheet_url(sheet_name)
+            logger.info('IRP plan written to %s sheet', sheet_name)
 
-        if bq_client is not None:
-            bq_client.append_trade_log(result, account_type=args.account_type)
+            summary = format_irp_plan_summary(
+                plan_df=result,
+                account_type=args.account_type,
+                dt=kst_now,
+                sheet_url=sheet_url,
+            )
+            slack_notify(f'[{args.account_type}] IRP 리밸런싱 플랜 생성', summary)
+        else:
+            trade_log_url = gs_client.get_worksheet_url(f'{args.account_type}_trade_log')
+            summary = format_rebalancing_summary(
+                result_df=result,
+                remaining_cash=remaining_cash,
+                account_type=args.account_type,
+                dt=kst_now,
+                trade_log_url=trade_log_url,
+            )
+            slack_notify(f'[{args.account_type}] 리밸런싱 완료', summary)
+
+            if bq_client is not None:
+                bq_client.append_trade_log(result, account_type=args.account_type)
 
 
 if __name__ == '__main__':

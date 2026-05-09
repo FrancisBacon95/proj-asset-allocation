@@ -146,3 +146,61 @@ def format_rebalancing_summary(
         )
 
     return '\n'.join(lines)
+
+
+def format_irp_plan_summary(
+    plan_df: pd.DataFrame,
+    account_type: str,
+    dt,
+    sheet_url: str = None,
+) -> str:
+    """IRP 리밸런싱 플랜 생성 알림.
+
+    IRP는 KIS API로 자동 매매가 불가능해 거래 실행 없이 플랜만 생성된다.
+    사용자는 시트의 IRP_action_plan을 보고 KIS 앱에서 수동 매수/매도한다.
+    포맷: 헤더 + 매수/매도 종목 수 + 종목별 액션 + 시트 URL.
+    """
+    if hasattr(dt, 'strftime'):
+        dt_str = dt.strftime('%Y-%m-%d %H:%M KST') if hasattr(dt, 'hour') else dt.strftime('%Y-%m-%d') + ' KST'
+    else:
+        dt_str = str(dt)
+
+    df = plan_df[plan_df['ticker'] != 'CASH'].copy()
+    # required_transaction이 결측인 행은 제외 (변동 없는 종목)
+    df = df[df['required_transaction'].isin(['buy', 'sell'])]
+
+    buy_rows = df[df['required_transaction'] == 'buy']
+    sell_rows = df[df['required_transaction'] == 'sell']
+
+    lines = [
+        f'*[{account_type}] IRP 리밸런싱 플랜 생성* · {dt_str}',
+        f'IRP는 자동 매매 불가 — KIS 앱에서 수동으로 매수/매도 진행하세요.',
+        f'매수 {len(buy_rows)}건 · 매도 {len(sell_rows)}건 · 변동 없음 {len(plan_df) - len(df) - 1}건 (CASH 제외)',
+    ]
+    if sheet_url:
+        lines.append(f'<{sheet_url}|IRP_action_plan 시트 보기 →>')
+    lines.append('')
+
+    if df.empty:
+        lines.append('_플랜 변동 사항 없음 — 현재 비중이 목표와 일치._')
+        return '\n'.join(lines)
+
+    for _, row in df.iterrows():
+        nm     = str(row.get('stock_nm', row.get('ticker', '')))
+        ticker = str(row.get('ticker', ''))
+        action = str(row['required_transaction']).upper()
+        qty    = int(pd.to_numeric(row.get('required_quantity', 0), errors='coerce') or 0)
+        try:
+            tgt_pct = float(row['weight']) * 100
+            cur_pct = float(row.get('current_pct', 0))
+            pct_line = f'  목표 {tgt_pct:.1f}% · 현재 {cur_pct:.1f}%'
+        except (TypeError, ValueError):
+            pct_line = ''
+
+        action_emoji = '🟢' if action == 'BUY' else '🔴'
+        lines.append(
+            f'{action_emoji} *{nm}* ({ticker}) — {action} `{qty}`주\n'
+            + (pct_line if pct_line else '')
+        )
+
+    return '\n'.join(lines)
