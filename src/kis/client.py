@@ -13,6 +13,10 @@ from src.logger import get_logger, log_method_call
 
 logger = get_logger(__name__)
 
+# nrcvb_buy_amt 조회용 더미 ticker. inquire-psbl-order는 ticker 인자가 필수이지만
+# nrcvb_buy_amt 자체는 종목 무관 계좌 단위 상수임이 실험으로 확정됨 (test/dump_isa_orderable.py).
+DUMMY_TICKER_FOR_ORDERABLE_CASH = '005930'  # 삼성전자, 상장폐지 위험 사실상 없음
+
 
 class KISClient():
     '''
@@ -148,19 +152,61 @@ class KISClient():
     # ------------------------------------------------------------------ #
 
     @log_method_call
-    def fetch_domestic_cash_balance(self) -> int:
-        """국내 계좌 실질 현금을 조회한다.
+    def fetch_domestic_cash_breakdown(self) -> dict:
+        """국내 계좌 예수금 D+0/D+1/D+2 + 평가금액 요약을 반환한다.
 
-        dnca_tot_amt(결제 완료 예수금)에 당일 매도/매수 체결 금액을 반영해
-        실시간 실질 현금을 반환한다. 거래가 없는 날은 thdt_sll_amt와 thdt_buy_amt가
-        모두 0이므로 dnca_tot_amt 단독 값과 동일하다.
+        진단·검증 목적. KIS 잔고조회(inquire-balance) output2 응답에서
+        매수 가능 현금 및 총평가금액 산정에 직접 관계되는 필드를 추출한다.
+
+        KIS 공식 정의: tot_evlu_amt = scts_evlu_amt + prvs_rcdl_excc_amt
+        즉 "총평가금액 = 유가증권 평가금액 + D+2 예수금"이며, 본 시스템의
+        리밸런싱 기준 총자산도 이 식과 일치해야 한다.
+
+        Returns:
+            dict: 다음 정수 필드를 갖는 dict.
+                - dnca_tot_amt: D+0 예수금 (현재 결제 완료 잔액)
+                - nxdy_excc_amt: D+1 예수금 (내일 시점 예상 잔액)
+                - prvs_rcdl_excc_amt: D+2 예수금 (모든 미정산 청산 후 잔액)
+                - thdt_buy_amt: 금일 매수 체결액
+                - thdt_sll_amt: 금일 매도 체결액
+                - scts_evlu_amt: 유가증권 평가금액 (보유 종목 합계)
+                - tot_evlu_amt: 총평가금액 (= scts_evlu_amt + prvs_rcdl_excc_amt)
+
+        참고: docs/kis_cash_guide.md
         """
         output2 = self._domestic_balance_page()['output2'][0]
-        return (
-            int(output2['dnca_tot_amt'])
-            + int(output2['thdt_sll_amt'])
-            - int(output2['thdt_buy_amt'])
+        return {
+            'dnca_tot_amt': int(output2['dnca_tot_amt']),
+            'nxdy_excc_amt': int(output2['nxdy_excc_amt']),
+            'prvs_rcdl_excc_amt': int(output2['prvs_rcdl_excc_amt']),
+            'thdt_buy_amt': int(output2['thdt_buy_amt']),
+            'thdt_sll_amt': int(output2['thdt_sll_amt']),
+            'scts_evlu_amt': int(output2['scts_evlu_amt']),
+            'tot_evlu_amt': int(output2['tot_evlu_amt']),
+        }
+
+    @log_method_call
+    def fetch_domestic_cash_balance(self) -> int:
+        """국내 계좌 매수 가능 현금을 T+2 예수금 기준으로 반환한다.
+
+        prvs_rcdl_excc_amt(D+2 예수금)는 KIS API가 보고하는
+        "T+2 시점에 결제 완료되어 있을 잔액"이다. 이전·오늘 매도의 미정산 대금이
+        모두 반영되므로, 이를 매수에 활용해야 자본이 비효율적으로 묶이지 않는다.
+
+        진단을 위해 D+0/D+1/D+2 및 금일 체결 금액을 함께 INFO 로그로 남긴다.
+
+        참고: docs/kis_cash_guide.md
+        """
+        b = self.fetch_domestic_cash_breakdown()
+        logger.info(
+            'cash breakdown: D+0=%s, D+1=%s, D+2=%s, today_buy=%s, today_sell=%s',
+            f'{b["dnca_tot_amt"]:,}',
+            f'{b["nxdy_excc_amt"]:,}',
+            f'{b["prvs_rcdl_excc_amt"]:,}',
+            f'{b["thdt_buy_amt"]:,}',
+            f'{b["thdt_sll_amt"]:,}',
         )
+        return b['prvs_rcdl_excc_amt']
 
     @log_method_call
     def fetch_domestic_stock_balance(self) -> dict:
@@ -347,24 +393,22 @@ class KISClient():
         return self._get("uapi/domestic-stock/v1/trading/inquire-psbl-order", "TTTC8908R", params).json()['output']
 
     @log_method_call
-    def fetch_buy_orderable_cash(self, ticker: str) -> int:
-        """실제 매수 가능 현금을 조회한다.
+    def fetch_buy_orderable_cash(self) -> int:
+        """미수 없는 매수 가능 한도(nrcvb_buy_amt)를 반환한다.
 
-        API의 nrcvb_buy_amt(미수 없는 매수 가능 금액) + ruse_psbl_amt(재사용 가능 금액)에
-        당일 매도 대금(T+2 미반영분)을 합산한다.
-        dnca_tot_amt(예수금 총금액)는 CMA 등 즉시 주문 불가 금액을 포함할 수 있어 사용하지 않는다.
+        KIS 앱의 "주문가능" 표시와 일치하는 값. inquire-psbl-order의 nrcvb_buy_amt를
+        그대로 반환한다. 실험으로 종목 무관 계좌 단위 상수임이 확인되어 더미 ticker로 호출.
+
+        fetch_domestic_cash_balance(D+2 예수금)와는 별개 개념이다:
+        - 잔고/총자산 산정 → fetch_domestic_cash_balance (prvs_rcdl_excc_amt, KIS tot_evlu_amt 정의 일치)
+        - 실제 매수 한도 → 본 함수 (nrcvb_buy_amt, 미수 위험 0)
+
+        참고: docs/kis_cash_guide.md
         """
-        enable = self.fetch_domestic_enable_buy(ticker=ticker, ord_dvsn='01')
-        nrcvb = int(enable['nrcvb_buy_amt']) + int(enable['ruse_psbl_amt'])
-        balance = self._domestic_balance_page()['output2'][0]
-        thdt_sll_amt = int(balance['thdt_sll_amt'])
-        total = nrcvb + thdt_sll_amt
-        logger.info(
-            'buy_orderable: nrcvb=%s, ruse=%s, thdt_sll=%s → %s원 (dnca_tot=%s)',
-            enable['nrcvb_buy_amt'], enable['ruse_psbl_amt'],
-            thdt_sll_amt, total, balance['dnca_tot_amt'],
+        enable = self.fetch_domestic_enable_buy(
+            ticker=DUMMY_TICKER_FOR_ORDERABLE_CASH, ord_dvsn='01',
         )
-        return total
+        return int(enable['nrcvb_buy_amt'])
 
     @log_method_call
     def fetch_domestic_enable_sell(self, ticker: str) -> dict:

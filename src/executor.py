@@ -43,10 +43,10 @@ class OrderExecutor:
         cash_before_buy = self.kis_client.fetch_domestic_cash_balance()
         logger.info('buy 시작 전 예수금: %s', cash_before_buy)
 
-        # dnca_tot_amt는 CMA 등 즉시 주문 불가 금액을 포함할 수 있어 API의 nrcvb_buy_amt 기준으로 추적한다.
+        # 매수 가능 현금은 prvs_rcdl_excc_amt(D+2 예수금)를 기준으로 추적한다.
+        # 이전·금일 매도의 미정산 대금이 모두 반영되어 자본 효율이 가장 높다. (docs/kis_cash_guide.md)
         if not buys.empty:
-            first_ticker = buys.loc[buys.index[0]]['ticker']
-            remaining_cash = self.kis_client.fetch_buy_orderable_cash(first_ticker)
+            remaining_cash = self.kis_client.fetch_buy_orderable_cash()
         else:
             remaining_cash = cash_before_buy
         for i in buys.index:
@@ -102,8 +102,8 @@ class OrderExecutor:
 
         매수의 경우:
         - available_cash가 전달되면 해당 값을 기준으로 수량을 계산한다 (연속 매수 시 잔여 현금 추적용).
-        - 전달되지 않으면 API의 nrcvb_buy_amt + ruse_psbl_amt를 사용한다.
-        dnca_tot_amt는 CMA 등 즉시 주문 불가 금액을 포함할 수 있어 사용하지 않는다.
+        - 전달되지 않으면 prvs_rcdl_excc_amt(D+2 예수금) 기준으로 폴백한다.
+        가능수량 산정 단가는 inquire-psbl-order의 psbl_qty_calc_unpr을 그대로 사용한다.
         """
         if transaction_type == 'buy':
             result = self.kis_client.fetch_domestic_enable_buy(ticker=ticker, ord_dvsn='01')
@@ -111,8 +111,7 @@ class OrderExecutor:
             if available_cash is not None:
                 cash_balance = available_cash
             else:
-                # available_cash 없이 단독 호출 시 API의 실제 주문 가능 금액을 사용
-                cash_balance = int(result['nrcvb_buy_amt']) + int(result['ruse_psbl_amt'])
+                cash_balance = self.kis_client.fetch_domestic_cash_balance()
             available_amt = cash_balance * 0.99
             logger.info(
                 '[%s] cash_balance=%s, available_amt=%s, calc_price=%s → enable_qty=%s',
