@@ -33,44 +33,48 @@ def _make_executor(is_test: bool = False) -> OrderExecutor:
 # ---------------------------------------------------------------------------- #
 
 def test_orderable_qty_basic():
-    """1-1. 기본 계산: cash=1,000,000원, calc=10,000원 → 99주 (0.99 버퍼 적용)."""
+    """1-1. 기본 계산: cash=1,000,000원, calc=10,000원 → (99주, 10000) 튜플 반환."""
     ex = _make_executor()
     mock_response = {'psbl_qty_calc_unpr': '10000'}
     with patch.object(type(ex.kis_client), 'fetch_domestic_enable_buy', return_value=mock_response):
-        qty = ex._get_orderable_qty(ticker='005930', transaction_type='buy', available_cash=1_000_000)
+        qty, calc_price = ex._get_orderable_qty(ticker='005930', transaction_type='buy', available_cash=1_000_000)
     assert qty == 99, f'기대 99주, 실제 {qty}주 (= floor(0.99 × 1,000,000 / 10,000))'
-    print('✅ 1-1 _get_orderable_qty 기본: 1,000,000 / 10,000 → 99주 (0.99 버퍼)')
+    assert calc_price == 10_000, f'calc_price 노출 검증, 실제 {calc_price}'
+    print('✅ 1-1 _get_orderable_qty 기본: (99, 10000) 튜플 반환')
 
 
 def test_orderable_qty_buffer_boundary():
-    """1-2. 0.99 버퍼 경계: cash=100,100원, calc=10,000원 → 9주 (10주 X)."""
+    """1-2. 0.99 버퍼 경계: cash=100,100원, calc=10,000원 → (9주, 10000)."""
     ex = _make_executor()
     mock_response = {'psbl_qty_calc_unpr': '10000'}
     with patch.object(type(ex.kis_client), 'fetch_domestic_enable_buy', return_value=mock_response):
-        qty = ex._get_orderable_qty(ticker='005930', transaction_type='buy', available_cash=100_100)
+        qty, calc_price = ex._get_orderable_qty(ticker='005930', transaction_type='buy', available_cash=100_100)
     # available_amt = 100,100 × 0.99 = 99,099 → 99,099 / 10,000 = 9.9099 → 9주
     assert qty == 9, f'기대 9주(10주는 0.99 버퍼 때문에 불가), 실제 {qty}주'
-    print('✅ 1-2 _get_orderable_qty 버퍼 경계: 100,100 → 9주 (10주 차단)')
+    assert calc_price == 10_000
+    print('✅ 1-2 _get_orderable_qty 버퍼 경계: (9, 10000)')
 
 
 def test_orderable_qty_zero_calc_price():
-    """1-3. calc_price=0 안전성: ZeroDivisionError 없이 0 반환."""
+    """1-3. calc_price=0 안전성: ZeroDivisionError 없이 (0, 0) 반환."""
     ex = _make_executor()
     mock_response = {'psbl_qty_calc_unpr': '0'}
     with patch.object(type(ex.kis_client), 'fetch_domestic_enable_buy', return_value=mock_response):
-        qty = ex._get_orderable_qty(ticker='005930', transaction_type='buy', available_cash=1_000_000)
+        qty, calc_price = ex._get_orderable_qty(ticker='005930', transaction_type='buy', available_cash=1_000_000)
     assert qty == 0, f'calc_price=0이면 0 반환해야 함, 실제 {qty}'
-    print('✅ 1-3 _get_orderable_qty calc_price=0: ZeroDivision 없이 0 반환')
+    assert calc_price == 0
+    print('✅ 1-3 _get_orderable_qty calc_price=0: ZeroDivision 없이 (0, 0) 반환')
 
 
 def test_orderable_qty_insufficient_cash():
-    """1-4. 소액 현금: cash=5,000원, calc=10,000원 → 0주."""
+    """1-4. 소액 현금: cash=5,000원, calc=10,000원 → (0주, 10000)."""
     ex = _make_executor()
     mock_response = {'psbl_qty_calc_unpr': '10000'}
     with patch.object(type(ex.kis_client), 'fetch_domestic_enable_buy', return_value=mock_response):
-        qty = ex._get_orderable_qty(ticker='005930', transaction_type='buy', available_cash=5_000)
+        qty, calc_price = ex._get_orderable_qty(ticker='005930', transaction_type='buy', available_cash=5_000)
     assert qty == 0, f'현금 부족 시 0주, 실제 {qty}주'
-    print('✅ 1-4 _get_orderable_qty 현금 부족: 5,000 / 10,000 → 0주')
+    assert calc_price == 10_000
+    print('✅ 1-4 _get_orderable_qty 현금 부족: (0, 10000)')
 
 
 # ---------------------------------------------------------------------------- #
@@ -78,22 +82,23 @@ def test_orderable_qty_insufficient_cash():
 # ---------------------------------------------------------------------------- #
 
 def test_execute_order_required_exceeds_enable():
-    """2-1. 계획수량 > 가능수량: required=100, enable=50 → transaction=50."""
+    """2-1. 계획수량 > 가능수량: required=100, enable=50 → transaction=50, calc_price 보존."""
     ex = _make_executor()
     plan_row = {
         'ticker': '005930', 'required_quantity': 100,
         'required_transaction': 'buy', 'current_price': 10000,
     }
     mock_order = MagicMock(return_value={'rt_cd': '0', 'msg1': 'ok'})
-    with patch.object(ex, '_get_orderable_qty', return_value=50), \
+    with patch.object(ex, '_get_orderable_qty', return_value=(50, 10_000)), \
          patch.object(type(ex.kis_client), 'create_domestic_order', mock_order):
         result = ex._execute_order(plan_row, order_index=0, available_cash=1_000_000)
     assert result['enable_quantity'] == 50
     assert result['transaction_quantity'] == 50, f'min(100,50)=50 기대, 실제 {result["transaction_quantity"]}'
+    assert result['calc_price'] == 10_000, f'calc_price 보존돼야 함, 실제 {result.get("calc_price")}'
     assert result['skipped_reason'] is None, f'정상 주문은 skipped_reason None, 실제 {result["skipped_reason"]}'
     assert result['is_success'] is True
     assert mock_order.call_count == 1, '체결 시도 1회 호출돼야 함'
-    print('✅ 2-1 _execute_order min(): required=100 ∧ enable=50 → transaction=50')
+    print('✅ 2-1 _execute_order min(): required=100 ∧ enable=50 → transaction=50, calc_price=10000')
 
 
 def test_execute_order_zero_quantity_skips():
@@ -104,15 +109,16 @@ def test_execute_order_zero_quantity_skips():
         'required_transaction': 'buy', 'current_price': 10000,
     }
     mock_order = MagicMock()
-    with patch.object(ex, '_get_orderable_qty', return_value=0), \
+    with patch.object(ex, '_get_orderable_qty', return_value=(0, 10_000)), \
          patch.object(type(ex.kis_client), 'create_domestic_order', mock_order):
         result = ex._execute_order(plan_row, order_index=0, available_cash=1_000_000)
     assert result['transaction_quantity'] == 0
     assert result['skipped_reason'] == 'zero_quantity'
+    assert result['calc_price'] == 10_000, 'zero_quantity여도 calc_price는 보존'
     assert result['is_success'] is None, '주문 미호출 시 is_success=None'
     assert result['response_msg'] is None
     assert mock_order.call_count == 0, '가능수량 0이면 create_domestic_order 호출 금지'
-    print('✅ 2-2 _execute_order zero_quantity: skip + 주문 미호출')
+    print('✅ 2-2 _execute_order zero_quantity: skip + 주문 미호출 + calc_price 보존')
 
 
 # ---------------------------------------------------------------------------- #
@@ -127,14 +133,15 @@ def test_execute_order_test_mode_skips_real_order():
         'required_transaction': 'buy', 'current_price': 10000,
     }
     mock_order = MagicMock()
-    with patch.object(ex, '_get_orderable_qty', return_value=50), \
+    with patch.object(ex, '_get_orderable_qty', return_value=(50, 10_000)), \
          patch.object(type(ex.kis_client), 'create_domestic_order', mock_order):
         result = ex._execute_order(plan_row, order_index=0, available_cash=1_000_000)
     assert result['enable_quantity'] == 50, 'enable_quantity는 그대로 50 보고'
     assert result['transaction_quantity'] == 0, 'is_test 모드에서는 transaction=0'
     assert result['skipped_reason'] == 'test_mode'
+    assert result['calc_price'] == 10_000, 'is_test 모드에서도 calc_price는 보존'
     assert mock_order.call_count == 0, 'is_test=True에서는 절대 create_domestic_order 호출 금지'
-    print('✅ 3-1 is_test=True: 실주문 미호출 + skipped_reason=test_mode')
+    print('✅ 3-1 is_test=True: 실주문 미호출 + skipped_reason=test_mode + calc_price 보존')
 
 
 # ---------------------------------------------------------------------------- #
@@ -142,16 +149,18 @@ def test_execute_order_test_mode_skips_real_order():
 # ---------------------------------------------------------------------------- #
 
 _ORDER_RESULT_KEYS = [
-    'ticker', 'enable_quantity', 'transaction_quantity',
+    'ticker', 'enable_quantity', 'transaction_quantity', 'calc_price',
     'skipped_reason', 'is_success', 'response_msg', 'transaction_order',
 ]
 
 
-def _stub_order_result(ticker: str, transaction_quantity: int, transaction_order: int) -> dict:
+def _stub_order_result(ticker: str, transaction_quantity: int, transaction_order: int,
+                       calc_price: int = None) -> dict:
     return {
         'ticker': ticker,
         'enable_quantity': transaction_quantity,
         'transaction_quantity': transaction_quantity,
+        'calc_price': calc_price,
         'skipped_reason': None,
         'is_success': True,
         'response_msg': 'ok',
@@ -160,7 +169,7 @@ def _stub_order_result(ticker: str, transaction_quantity: int, transaction_order
 
 
 def test_run_rebalancing_remaining_cash_decremented():
-    """4-1. 두 종목 연속 매수: 첫 주문 100×5,000=500,000원 차감 후 두 번째 호출에 잔여 전달."""
+    """4-1. 두 종목 연속 매수: 첫 주문 100×5,500(calc_price)=550,000원 차감 후 두 번째 호출에 잔여 전달."""
     ex = _make_executor()
     plan_df = pd.DataFrame([
         {'ticker': '005930', 'required_quantity': 100, 'required_transaction': 'buy', 'current_price': 5000},
@@ -169,9 +178,10 @@ def test_run_rebalancing_remaining_cash_decremented():
     with patch.object(type(ex.kis_client), 'fetch_buy_orderable_cash', return_value=1_000_000), \
          patch.object(type(ex.kis_client), 'fetch_domestic_cash_balance', return_value=1_000_000), \
          patch.object(ex, '_execute_order') as mock_exec:
+        # current_price=5000, calc_price=5500 (보수단가가 더 높음)
         mock_exec.side_effect = [
-            _stub_order_result('005930', 100, 0),
-            _stub_order_result('000660', 50, 1),
+            _stub_order_result('005930', 100, 0, calc_price=5500),
+            _stub_order_result('000660', 50, 1, calc_price=4500),
         ]
         ex.run_rebalancing(plan_df)
 
@@ -180,11 +190,12 @@ def test_run_rebalancing_remaining_cash_decremented():
     assert mock_exec.call_args_list[0].kwargs['available_cash'] == 1_000_000, (
         f'첫 호출 available_cash=1,000,000 기대, 실제 {mock_exec.call_args_list[0].kwargs["available_cash"]:,}'
     )
-    # 두 번째 호출: available_cash = 1,000,000 - 100×5,000 = 500,000
-    assert mock_exec.call_args_list[1].kwargs['available_cash'] == 500_000, (
-        f'두 번째 호출 available_cash=500,000 기대, 실제 {mock_exec.call_args_list[1].kwargs["available_cash"]:,}'
+    # 두 번째 호출: available_cash = 1,000,000 - 100×5,500 = 450,000 (calc_price 기준 보수 차감)
+    assert mock_exec.call_args_list[1].kwargs['available_cash'] == 450_000, (
+        f'두 번째 호출 available_cash=450,000(=1,000,000-100×5500) 기대, '
+        f'실제 {mock_exec.call_args_list[1].kwargs["available_cash"]:,}'
     )
-    print('✅ 4-1 run_rebalancing 잔여 추적: 100×5,000=500,000 차감 후 두 번째 매수에 전달')
+    print('✅ 4-1 run_rebalancing 잔여 추적: 100×5,500=550,000 차감 후 두 번째 매수에 전달')
 
 
 def test_run_rebalancing_zero_fill_keeps_remaining_cash():
@@ -198,8 +209,8 @@ def test_run_rebalancing_zero_fill_keeps_remaining_cash():
          patch.object(type(ex.kis_client), 'fetch_domestic_cash_balance', return_value=1_000_000), \
          patch.object(ex, '_execute_order') as mock_exec:
         mock_exec.side_effect = [
-            _stub_order_result('005930', 0, 0),    # 체결 실패
-            _stub_order_result('000660', 50, 1),
+            _stub_order_result('005930', 0, 0, calc_price=5500),    # 체결 실패 (calc_price 있어도 qty=0이면 차감 0)
+            _stub_order_result('000660', 50, 1, calc_price=4500),
         ]
         ex.run_rebalancing(plan_df)
 
@@ -209,6 +220,36 @@ def test_run_rebalancing_zero_fill_keeps_remaining_cash():
         f'체결 0이면 잔여 변동 없어야 함, 실제 {mock_exec.call_args_list[1].kwargs["available_cash"]:,}'
     )
     print('✅ 4-2 run_rebalancing 체결 실패 시 잔여 유지')
+
+
+def test_run_rebalancing_uses_calc_price_for_deduction():
+    """4-3. 매수 잔여 차감이 current_price가 아닌 calc_price(보수단가) 기준으로 일어남을 검증.
+
+    calc_price > current_price일 때 우리 추적 잔여가 더 작아져야 한다 (보수적).
+    current_price 기준이라면 두 번째 호출 available_cash=950,000이 되겠지만,
+    calc_price 기준이므로 945,000이 되어야 한다.
+    """
+    ex = _make_executor()
+    plan_df = pd.DataFrame([
+        {'ticker': '005930', 'required_quantity': 10, 'required_transaction': 'buy', 'current_price': 5000},
+        {'ticker': '000660', 'required_quantity': 5,  'required_transaction': 'buy', 'current_price': 4000},
+    ])
+    with patch.object(type(ex.kis_client), 'fetch_buy_orderable_cash', return_value=1_000_000), \
+         patch.object(type(ex.kis_client), 'fetch_domestic_cash_balance', return_value=1_000_000), \
+         patch.object(ex, '_execute_order') as mock_exec:
+        # current_price=5000이지만 calc_price=5500 (보수단가가 더 높음)
+        mock_exec.side_effect = [
+            _stub_order_result('005930', 10, 0, calc_price=5500),
+            _stub_order_result('000660', 5, 1, calc_price=4500),
+        ]
+        ex.run_rebalancing(plan_df)
+    # 첫 종목 차감 = 10 × 5500 = 55,000 (current_price 기준이면 50,000)
+    # 두 번째 매수 시 available_cash = 1,000,000 - 55,000 = 945,000
+    assert mock_exec.call_args_list[1].kwargs['available_cash'] == 945_000, (
+        f'calc_price=5500 기준 차감이어야 함 (945,000), 실제 {mock_exec.call_args_list[1].kwargs["available_cash"]:,}. '
+        f'현재가 기준이면 950,000이 됐을 것.'
+    )
+    print('✅ 4-3 run_rebalancing: 잔여 차감이 calc_price 기준 (보수적)')
 
 
 if __name__ == '__main__':
@@ -221,4 +262,5 @@ if __name__ == '__main__':
     test_execute_order_test_mode_skips_real_order()
     test_run_rebalancing_remaining_cash_decremented()
     test_run_rebalancing_zero_fill_keeps_remaining_cash()
+    test_run_rebalancing_uses_calc_price_for_deduction()
     print('\n전체 테스트 통과')
