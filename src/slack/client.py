@@ -185,6 +185,29 @@ _IRP_PLAN_REQUIRED_COLUMNS = (
     'ticker', 'required_transaction', 'required_quantity', 'weight', 'current_pct',
 )
 
+_IRP_DIVIDER = '━' * 14
+_IRP_SHEET_LINK_LABEL = 'IRP_action_plan 시트 보기 →'
+
+
+def _format_irp_section(rows: pd.DataFrame, title: str, emoji: str, *, is_sell: bool) -> list:
+    """IRP 섹션(SELL/BUY) 라인 빌더. rows가 비면 빈 리스트 반환(섹션 전체 생략)."""
+    if rows.empty:
+        return []
+    lines = [_IRP_DIVIDER, f'{emoji} {title}', _IRP_DIVIDER, '']
+    for _, row in rows.iterrows():
+        ticker  = str(row['ticker'])
+        nm      = str(row.get('stock_nm', ticker))
+        qty     = int(row['required_quantity'])
+        signed  = -qty if is_sell else qty
+        tgt_pct = float(row['weight']) * 100
+        cur_pct = float(row['current_pct'])
+        delta   = tgt_pct - cur_pct
+        lines.append(f'[{ticker}] {nm}')
+        lines.append(f'{signed:+d}주')
+        lines.append(f'{cur_pct:.1f}% → {tgt_pct:.1f}% ({delta:+.1f}%)')
+        lines.append('')
+    return lines
+
 
 def format_irp_plan_summary(
     plan_df: pd.DataFrame,
@@ -196,55 +219,53 @@ def format_irp_plan_summary(
 
     IRP는 KIS API로 자동 매매가 불가능해 거래 실행 없이 플랜만 생성된다.
     사용자는 시트의 IRP_action_plan을 보고 KIS 앱에서 수동 매수/매도한다.
-    포맷: 헤더 + 매수/매도 카운트 + 종목별 액션 + 시트 URL.
+    포맷: 헤더 + 총 카운트 + SELL 섹션 + BUY 섹션 + 시트 URL.
+    섹션 내부는 |target_pct - current_pct| 내림차순 정렬 (큰 변동 우선 노출).
 
     필수 컬럼이 누락되면 KeyError로 즉시 실패 (silent failure 방지).
     required_quantity가 0인 행은 출력에서 제외 (KOFR buy 0주 같은 헷갈리는 표기 방지).
     """
-    # 필수 컬럼 검증 — 누락 시 KeyError로 즉시 폭발 (silent 위장 방지)
     missing = [c for c in _IRP_PLAN_REQUIRED_COLUMNS if c not in plan_df.columns]
     if missing:
         raise KeyError(f'format_irp_plan_summary 필수 컬럼 누락: {missing}')
 
-    if hasattr(dt, 'strftime'):
-        dt_str = dt.strftime('%Y-%m-%d %H:%M KST') if hasattr(dt, 'hour') else dt.strftime('%Y-%m-%d') + ' KST'
-    else:
-        dt_str = str(dt)
+    date_str = dt.strftime('%Y-%m-%d') if hasattr(dt, 'strftime') else str(dt)
+    header = f'📌 {account_type} 리밸런싱 플랜: {date_str}'
 
     df = plan_df[plan_df['ticker'] != 'CASH'].copy()
-    # required_transaction이 buy/sell이고 required_quantity > 0인 행만 (변동 0인 종목 제외)
     df['required_quantity'] = pd.to_numeric(df['required_quantity'], errors='coerce').fillna(0).astype(int)
     actionable = df[
         df['required_transaction'].isin(['buy', 'sell']) & (df['required_quantity'] > 0)
-    ]
-
-    buy_rows = actionable[actionable['required_transaction'] == 'buy']
-    sell_rows = actionable[actionable['required_transaction'] == 'sell']
-
-    lines = [
-        f'*[{account_type}] IRP 리밸런싱 플랜 생성* · {dt_str}',
-        f'IRP는 자동 매매 불가 — KIS 앱에서 수동으로 매수/매도 진행하세요.',
-        f'매수 {len(buy_rows)}건 · 매도 {len(sell_rows)}건 (CASH·변동 없음 제외)',
-    ]
-    if sheet_url:
-        lines.append(f'<{sheet_url}|IRP_action_plan 시트 보기 →>')
-    lines.append('')
+    ].copy()
 
     if actionable.empty:
-        lines.append('_플랜 변동 사항 없음 — 현재 비중이 목표와 일치._')
+        lines = [header, '', '변동 없음 (현재 비중 = 목표)']
+        if sheet_url:
+            lines.append('')
+            lines.append(f'<{sheet_url}|{_IRP_SHEET_LINK_LABEL}>')
         return '\n'.join(lines)
 
-    for _, row in actionable.iterrows():
-        nm     = str(row.get('stock_nm', row['ticker']))
-        ticker = str(row['ticker'])
-        action = str(row['required_transaction']).upper()
-        qty    = int(row['required_quantity'])
-        tgt_pct = float(row['weight']) * 100
-        cur_pct = float(row['current_pct'])
-        action_emoji = '🟢' if action == 'BUY' else '🔴'
-        lines.append(
-            f'{action_emoji} *{nm}* ({ticker}) — {action} `{qty}`주\n'
-            f'  목표 {tgt_pct:.1f}% · 현재 {cur_pct:.1f}%'
-        )
+    # 비중 변동량 절댓값 내림차순 + 동률 시 ticker 오름차순 (안정적 표시)
+    actionable['_abs_delta'] = (actionable['weight'] * 100 - actionable['current_pct']).abs()
+    actionable = actionable.sort_values(['_abs_delta', 'ticker'], ascending=[False, True])
+
+    sell_rows = actionable[actionable['required_transaction'] == 'sell']
+    buy_rows  = actionable[actionable['required_transaction'] == 'buy']
+
+    lines = [
+        header,
+        '',
+        f'총 {len(actionable)}건',
+        f'🟢 매수 {len(buy_rows)}건 · 🔴 매도 {len(sell_rows)}건',
+        '',
+    ]
+    lines.extend(_format_irp_section(sell_rows, 'SELL', '🔴', is_sell=True))
+    lines.extend(_format_irp_section(buy_rows,  'BUY',  '🟢', is_sell=False))
+
+    while lines and lines[-1] == '':
+        lines.pop()
+    if sheet_url:
+        lines.append('')
+        lines.append(f'<{sheet_url}|{_IRP_SHEET_LINK_LABEL}>')
 
     return '\n'.join(lines)
