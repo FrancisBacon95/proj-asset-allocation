@@ -141,7 +141,6 @@ class KISClient():
         # 기존 .dat 파일은 자연스럽게 미사용으로 폐기 (gitignore: kis_token_* 모두 매치).
         self.token_file = PROJECT_ROOT / f'kis_token_{account_type}.json'
         self.access_token = None
-        self._exchange_rate = None  # 환율 캐시 (fetch_price 최초 호출 시 로드)
 
         self.initialize_access_token()
 
@@ -828,24 +827,14 @@ class KISClient():
             "uapi/overseas-price/v1/quotations/price", "HHDFS00000300", params,
         )
 
-    @property
-    def exchange_rate(self) -> float:
-        """USD/KRW 환율을 반환한다. 최초 접근 시 yfinance로 조회하고 이후 캐시를 사용한다."""
-        if self._exchange_rate is None:
-            import yfinance as yf
-            self._exchange_rate = yf.Ticker('KRW=X').history(period='1d')['Close'].iloc[-1]
-        return self._exchange_rate
-
     @log_method_call
-    def fetch_price(self, ticker: str, exchange_code: str = "NAS") -> float:
-        """국내/해외 종목의 현재가를 원화로 반환한다.
+    def fetch_price(self, ticker: str) -> float:
+        """국내(KRX) 종목의 현재가(원)를 반환한다.
 
-        종목코드가 6자리 숫자이면 국내주식으로 판단하고, 그 외는 해외주식으로 조회한다.
-        해외주식은 exchange_rate를 곱해 원화로 환산한다.
+        ticker는 KRX 단축코드(6자리 영숫자, 영문자 섞인 신규 ETF/ETN 코드 포함)를 그대로
+        넘긴다. 유효하지 않은 코드면 KIS API가 에러를 반환한다.
         """
-        if ticker.isdigit() and len(ticker) == 6:
-            return float(self.fetch_domestic_price('J', ticker)['output']['stck_prpr'])
-        return float(self.fetch_oversea_price(ticker, exchange_code)['output']['last']) * self.exchange_rate
+        return float(self.fetch_domestic_price('J', ticker)['output']['stck_prpr'])
 
     # ------------------------------------------------------------------ #
     # 휴장일 조회                                                            #
