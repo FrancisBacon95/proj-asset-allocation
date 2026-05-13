@@ -233,7 +233,7 @@ def test_overwrite_dataframe_empty_df_writes_only_header():
 # ---------------------------------------------------------------------------- #
 
 def test_format_irp_plan_summary_includes_header_and_url():
-    """IRP 포맷 헤더, 매수/매도 카운트, 시트 URL 모두 포함."""
+    """IRP 포맷 헤더(📌 + account_type + 날짜), 카운트, 섹션 헤더, 시트 URL 포함."""
     from src.slack.client import format_irp_plan_summary
     from datetime import datetime
     import pytz
@@ -258,17 +258,58 @@ def test_format_irp_plan_summary_includes_header_and_url():
         sheet_url='https://docs.google.com/spreadsheets/d/abc#gid=123',
     )
 
-    assert '[IRP] IRP 리밸런싱 플랜 생성' in summary, 'IRP 헤더 누락'
-    assert '자동 매매 불가' in summary, '수동 매매 안내 누락'
-    assert '매수 1건' in summary
-    assert '매도 1건' in summary
-    assert 'IRP_action_plan 시트 보기' in summary, '시트 URL 링크 누락'
-    assert 'https://docs.google.com/spreadsheets/d/abc#gid=123' in summary
-    assert '삼성전자' in summary and 'BUY' in summary
-    assert 'SK하이닉스' in summary and 'SELL' in summary
+    assert '📌 IRP 리밸런싱 플랜: 2026-05-09' in summary, '새 헤더(이모지+account_type+날짜) 누락'
+    assert '총 2건' in summary, '총 카운트 라인 누락'
+    assert '🟢 매수 1건 · 🔴 매도 1건' in summary, '매수/매도 카운트 라인 누락'
+    assert '🔴 SELL' in summary and '🟢 BUY' in summary, '섹션 헤더 누락'
+    assert '━' * 14 in summary, '구분선 누락'
+    assert '[005930] 삼성전자' in summary, 'BUY 종목 라인 누락'
+    assert '[000660] SK하이닉스' in summary, 'SELL 종목 라인 누락'
+    assert '+5주' in summary, 'BUY 수량 부호 누락'
+    assert '-2주' in summary, 'SELL 수량 부호 누락'
+    # 비중 라인: cur% → tgt% (±Δ%) — 삼성전자 25.0→30.0 (+5.0)
+    assert '25.0% → 30.0% (+5.0%)' in summary
+    # SK하이닉스 30.0→20.0 (-10.0)
+    assert '30.0% → 20.0% (-10.0%)' in summary
+    assert f'<https://docs.google.com/spreadsheets/d/abc#gid=123|IRP_action_plan 시트 보기 →>' in summary
+    # SELL 섹션이 BUY 섹션보다 먼저 와야 함
+    assert summary.index('🔴 SELL') < summary.index('🟢 BUY'), 'SELL이 BUY보다 먼저 와야 함'
     # CASH 행은 출력에서 제외돼야 함
     assert 'WON_DEPOSIT' not in summary
-    print('✅ format_irp_plan_summary: 헤더 + 매수/매도 카운트 + 시트 URL + 종목 액션 포함')
+    # 기존 메시지 잔재가 남지 않아야 함
+    assert '자동 매매 불가' not in summary, '구버전 안내 문구 잔재'
+    assert '플랜 생성' not in summary, '구버전 헤더 잔재'
+    print('✅ format_irp_plan_summary: 새 양식 헤더/카운트/섹션/종목/링크/순서 모두 검증')
+
+
+def test_format_irp_plan_summary_sorts_by_abs_delta_desc():
+    """섹션 내부는 |target - current| 절댓값 내림차순으로 정렬."""
+    from src.slack.client import format_irp_plan_summary
+    from datetime import datetime
+
+    plan_df = pd.DataFrame([
+        # SELL: 절댓값 0.5, 4.0, 1.5 → 정렬 후 4.0, 1.5, 0.5
+        {'ticker': 'AAA', 'stock_nm': 'A주식',
+         'required_transaction': 'sell', 'required_quantity': 1,
+         'weight': 0.10, 'current_pct': 10.5},  # delta -0.5
+        {'ticker': 'BBB', 'stock_nm': 'B주식',
+         'required_transaction': 'sell', 'required_quantity': 2,
+         'weight': 0.06, 'current_pct': 10.0},  # delta -4.0
+        {'ticker': 'CCC', 'stock_nm': 'C주식',
+         'required_transaction': 'sell', 'required_quantity': 3,
+         'weight': 0.085, 'current_pct': 10.0},  # delta -1.5
+    ])
+
+    summary = format_irp_plan_summary(
+        plan_df=plan_df, account_type='IRP',
+        dt=datetime(2026, 5, 9), sheet_url=None,
+    )
+
+    pos_b = summary.index('[BBB]')
+    pos_c = summary.index('[CCC]')
+    pos_a = summary.index('[AAA]')
+    assert pos_b < pos_c < pos_a, f'절댓값 내림차순(B<C<A) 기대, 실제 위치 B={pos_b} C={pos_c} A={pos_a}'
+    print('✅ format_irp_plan_summary: 섹션 내부 |Δ| 내림차순 정렬')
 
 
 def test_format_irp_plan_summary_excludes_zero_quantity():
@@ -295,9 +336,10 @@ def test_format_irp_plan_summary_excludes_zero_quantity():
 
     assert '삼성전자' in summary, 'qty>0 종목은 포함'
     assert 'KOFR' not in summary, 'qty=0 종목은 출력 제외 (BUY 0주는 헷갈림)'
-    assert '매수 1건' in summary, '카운트도 qty>0만 반영'
-    assert '매도 0건' in summary
-    print('✅ format_irp_plan_summary: required_quantity=0 종목 출력 제외 + 카운트 정확 (P3)')
+    assert '🟢 매수 1건 · 🔴 매도 0건' in summary, '카운트도 qty>0만 반영'
+    # SELL 섹션은 0건이므로 헤더 자체가 없어야 함
+    assert '🔴 SELL' not in summary, '한쪽이 0건이면 그 섹션 전체 생략'
+    print('✅ format_irp_plan_summary: required_quantity=0 종목 출력 제외 + 0건 섹션 생략 (P3)')
 
 
 def test_format_irp_plan_summary_raises_on_missing_required_column():
@@ -345,9 +387,12 @@ def test_format_irp_plan_summary_empty_plan():
         sheet_url=None,  # URL 없는 케이스
     )
 
-    assert '매수 0건' in summary and '매도 0건' in summary
-    assert '플랜 변동 사항 없음' in summary
+    assert '📌 IRP 리밸런싱 플랜: 2026-05-09' in summary, '빈 케이스에도 헤더는 표시'
+    assert '변동 없음 (현재 비중 = 목표)' in summary, '빈 케이스 안내 문구'
     assert '시트 보기' not in summary  # URL None이면 링크 부재
+    # 빈 케이스에는 섹션/카운트 라인이 없어야 깔끔
+    assert '🔴 SELL' not in summary and '🟢 BUY' not in summary, '빈 케이스에 섹션 헤더 부재'
+    assert '총 ' not in summary, '빈 케이스에 카운트 라인 부재'
     print('✅ format_irp_plan_summary: 변동 없는 플랜 + URL 부재 케이스')
 
 
@@ -373,6 +418,7 @@ if __name__ == '__main__':
     test_overwrite_dataframe_creates_missing_sheet()
     test_overwrite_dataframe_empty_df_writes_only_header()
     test_format_irp_plan_summary_includes_header_and_url()
+    test_format_irp_plan_summary_sorts_by_abs_delta_desc()
     test_format_irp_plan_summary_excludes_zero_quantity()
     test_format_irp_plan_summary_raises_on_missing_required_column()
     test_format_irp_plan_summary_empty_plan()
